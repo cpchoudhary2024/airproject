@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PurpleAir Local Analyzer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
+    <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Air Quality Research Platform</p>
+          <h1>Professional Analysis</h1>
+          <p class="subtitle">
+            Analyze PurpleAir data with EPA corrections, sensor validation, and publication-ready research reports.
+            Generate institutional-grade documentation suitable for academic and regulatory use.
+          </p>
+        </div>
+        <div class="hero-card">
+          <h2>Data Import</h2>
+
+          <div class="device-info-section">
+            <div class="device-info-row">
+              <div class="input-group-inline">
+                <label for="device-id-input">Device ID</label>
+                <input type="text" id="device-id-input" class="text-input" placeholder="e.g. PurpleAir #291796" maxlength="80" />
+              </div>
+              <div class="input-group-inline">
+                <label for="location-input">Location</label>
+                <input type="text" id="location-input" class="text-input" placeholder="e.g. Rooftop — Main St, Chicago" maxlength="120" />
+              </div>
+            </div>
+            <p class="meta" style="margin-top:4px;">Optional — appears at the top of the PDF report.</p>
+          </div>
+
+          <div id="dropzone" class="dropzone">
+            <p>Drop 1 PurpleAir CSV/XLSX file here</p>
+            <span>or</span>
+            <label class="btn">
+              Choose File
+              <input id="file-input" type="file" accept=".csv,.xlsx" />
+            </label>
+          </div>
+          <p class="meta">CSV or XLSX format. Dual sensor setup automatically detected.</p>
+          <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p>Analyzing data and building your dashboard...</p>
+          </div>
+        </div>
+      </header>
+
+      <main id="dashboard" class="dashboard hidden">
+        <section id="comparison-section" class="section comparison hidden">
+          <h2>Compare Files</h2>
+          <p class="section-note">Add files one by one (2–10 files from any folder), then press Compare.</p>
+
+          <div class="window-panel">
+            <div class="compare-file-list" id="compare-file-list">
+              <p class="group-note" id="compare-empty-note">No files added yet. Click "Add File" to begin.</p>
+            </div>
+            <div class="compare-controls">
+              <button type="button" class="btn secondary" id="compare-add-btn">+ Add File</button>
+              <input id="compare-file-picker" type="file" accept=".csv,.xlsx" style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none;" tabindex="-1" />
+              <button id="compare-run" class="btn primary" type="button" disabled>Compare</button>
+              <button id="compare-clear" class="btn ghost" type="button" style="display:none">Clear All</button>
+            </div>
+            <p id="compare-selection" class="group-note">0 / 10 files selected.</p>
+          </div>
+
+          <div id="comparison-results" class="hidden" style="margin-top: 18px;">
+            <div id="comparison-meta" class="chart-date-range"></div>
+            <div id="comparison-table"></div>
+            <div class="chart-container" style="margin-top: 18px;">
+              <div class="chart-header">
+                <h3>PM2.5 Trend Comparison</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon download-hd" data-chart="compare-timeseries">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-compare-timeseries"></div>
+            </div>
+            <div id="year-overlay-container" class="chart-container hidden" style="margin-top: 18px;">
+              <div class="chart-header">
+                <h3>Multi-Year PM2.5 Overlay (Day-of-Year)</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon download-hd" data-chart="year-overlay">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-year-overlay"></div>
+              <p class="section-note" style="padding:8px 12px;">Each line represents one year. X-axis = day of year (1–365), allowing direct year-over-year comparison at the same location.</p>
+            </div>
+            <div style="margin-top: 14px;">
+              <button id="compare-download-report" class="btn primary" type="button">
+                📄 Download Comparison Report (PDF)
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="section overview">
+          <h2>Overview</h2>
+          <div id="overview-cards" class="cards"></div>
+          <div id="quality-narrative" class="quality-narrative hidden"></div>
+        </section>
+
+        <section class="section narrative-section">
+          <h2>Analysis Summary</h2>
+          <div id="narrative-summary" class="narrative-card hidden">
+            <p id="narrative-text"></p>
+          </div>
+        </section>
+
+        <section class="section quality-methodology">
+          <h2>Quality Framework & Methodology</h2>
+          <div class="methodology-grid">
+            <div class="methodology-card">
+              <h3>1. Quality Score (JHU/MIT Standard)</h3>
+              <p>Formula: <strong>QS = 0.7×Validity + 0.3×Coverage</strong></p>
+              <p class="small">Prioritizes data integrity (70%) over temporal completeness (30%). Balances poor-quality readings with datasets containing gaps.</p>
+            </div>
+            <div class="methodology-card">
+              <h3>2. Sensor Health Index (CV)</h3>
+              <p>Formula: <strong>CV = (MAD / Mean PM2.5) × 100</strong></p>
+              <p class="small"><strong style="color: #00a651;">EXCELLENT</strong> (CV < 10%) | <strong style="color: #f6aa1c;">ACCEPTED</strong> (10-15%) | <strong style="color: #ff4444;">INVALID</strong> (≥15%)</p>
+            </div>
+            <div class="methodology-card">
+              <h3>3. STL Decomposition</h3>
+              <p>Period = 720 observations (2-min intervals = 24h cycle)</p>
+              <p class="small">Separates trend, seasonality, and residuals to identify pollution events independent of diurnal patterns.</p>
+            </div>
+            <div class="methodology-card">
+              <h3>4. Gap Analysis</h3>
+              <p>Distinguishes contiguous vs stochastic gaps</p>
+              <p class="small">Contiguous gaps (e.g., 8+ hours) are more damaging to trend analysis than random blips.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="section timeframe-selector">
+          <h2>Refine Analysis by Timeframe</h2>
+          <p class="section-note">Select a specific date range to regenerate reports and visualizations for that period.</p>
+          <div class="timeframe-controls">
+            <div class="date-inputs">
+              <div class="input-group">
+                <label for="date-from">Start Date:</label>
+                <input type="datetime-local" id="date-from" class="date-input" />
+              </div>
+              <div class="input-group">
+                <label for="date-to">End Date:</label>
+                <input type="datetime-local" id="date-to" class="date-input" />
+              </div>
+            </div>
+            <button id="btn-refine-analysis" class="btn primary">Generate for Selected Period</button>
+            <div id="refine-loading" class="loading hidden" style="margin-top: 16px;">
+              <div class="spinner" style="width: 20px; height: 20px;"></div>
+              <p>Regenerating analysis for selected timeframe...</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="section detected">
+          <h2>Detected columns</h2>
+          <div id="detected-columns" class="detected-grid"></div>
+        </section>
+
+        <section class="section charts">
+          <h2>Analysis Results</h2>
+          <div class="chart-grid">
+            <div class="chart-container chart-full-width">
+              <div class="chart-header">
+                <h3>AQI Calendar — Daily Air Quality</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon download-hd" data-chart="calendar">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-calendar" style="min-height:200px;"></div>
+              <div class="chart-description" id="desc-calendar"></div>
+            </div>
+
+            <div class="chart-container">
+              <div class="chart-header">
+                <h3>PM2.5 Temporal Trend</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon info-icon" title="Learn more" data-chart="timeseries">
+                    <span>ℹ️</span>
+                  </button>
+                  <button class="btn-icon download-hd" data-chart="timeseries">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-timeseries"></div>
+              <div class="chart-date-range" id="range-timeseries"></div>
+              <div class="chart-description" id="desc-timeseries"></div>
+              <div class="chart-tooltip" id="tooltip-timeseries" style="display: none;"></div>
+            </div>
+            
+            <div class="chart-container">
+              <div class="chart-header">
+                <h3>Air Quality Index</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon info-icon" title="Learn more" data-chart="aqi">
+                    <span>ℹ️</span>
+                  </button>
+                  <button class="btn-icon download-hd" data-chart="aqi">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-aqi"></div>
+              <div class="chart-description" id="desc-aqi"></div>
+              <div class="chart-tooltip" id="tooltip-aqi" style="display: none;"></div>
+            </div>
+            
+            <div class="chart-container">
+              <div class="chart-header">
+                <h3>Diurnal Cycle</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon info-icon" title="Learn more" data-chart="hourly">
+                    <span>ℹ️</span>
+                  </button>
+                  <button class="btn-icon download-hd" data-chart="hourly">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-hourly"></div>
+              <div class="chart-description" id="desc-hourly"></div>
+              <div class="chart-tooltip" id="tooltip-hourly" style="display: none;"></div>
+            </div>
+            
+            <div class="chart-container">
+              <div class="chart-header">
+                <h3>Rolling Medians (1h · 24h · 7d)</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon info-icon" title="Learn more" data-chart="heatmap">
+                    <span>ℹ️</span>
+                  </button>
+                  <button class="btn-icon download-hd" data-chart="heatmap">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-heatmap"></div>
+              <div class="chart-description" id="desc-heatmap"></div>
+              <div class="chart-tooltip" id="tooltip-heatmap" style="display: none;"></div>
+            </div>
+            
+            <div class="chart-container">
+              <div class="chart-header">
+                <h3>Monitor Location</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon info-icon" title="Learn more" data-chart="map">
+                    <span>ℹ️</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-map"></div>
+              <div class="chart-description" id="desc-map"></div>
+            </div>
+            
+            <div class="chart-container">
+              <div class="chart-header">
+                <h3>Dual Sensor Agreement</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon info-icon" title="Learn more" data-chart="channel">
+                    <span>ℹ️</span>
+                  </button>
+                  <button class="btn-icon download-hd" data-chart="channel">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-channel"></div>
+              <div class="chart-description" id="desc-channel"></div>
+              <div class="chart-tooltip" id="tooltip-channel" style="display: none;"></div>
+            </div>
+            </div>
+            
+            <div class="chart-container">
+              <div class="chart-header">
+                <h3>Sensor Drift Detection</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon info-icon" title="Learn more" data-chart="humidity">
+                    <span>ℹ️</span>
+                  </button>
+                  <button class="btn-icon download-hd" data-chart="humidity">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-humidity"></div>
+              <div class="chart-date-range" id="range-humidity"></div>
+              <div class="chart-description" id="desc-humidity"></div>
+              <div class="chart-tooltip" id="tooltip-humidity" style="display: none;"></div>
+            </div>
+            
+            <div class="chart-container">
+              <div class="chart-header">
+                <h3>Data Quality Radar</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon info-icon" title="Learn more" data-chart="aqi-dist">
+                    <span>ℹ️</span>
+                  </button>
+                  <button class="btn-icon download-hd" data-chart="aqi-dist">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-aqi-dist"></div>
+              <div class="chart-date-range" id="range-aqi-dist"></div>
+              <div class="chart-description" id="desc-aqi-dist"></div>
+              <div class="chart-tooltip" id="tooltip-aqi-dist" style="display: none;"></div>
+            </div>
+            
+            <div class="chart-container">
+              <div class="chart-header">
+                <h3>24-Hour Temporal Pattern</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon info-icon" title="Learn more" data-chart="quality">
+                    <span>ℹ️</span>
+                  </button>
+                  <button class="btn-icon download-hd" data-chart="quality">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-quality"></div>
+              <div class="chart-date-range" id="range-quality"></div>
+              <div class="chart-description" id="desc-quality"></div>
+              <div class="chart-tooltip" id="tooltip-quality" style="display: none;"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section correction-section">
+          <h2>PM2.5 Correction Formula Comparison</h2>
+          <p class="section-note">Compare how three correction equations translate raw sensor readings. The main analysis uses EPA Barkjohn.</p>
+
+          <div class="correction-controls">
+            <label for="correction-select">Active formula shown in legend:</label>
+            <select id="correction-select" class="correction-dropdown">
+              <option value="barkjohn" selected>EPA Barkjohn (default)</option>
+              <option value="lrapa">LRAPA</option>
+              <option value="aqu">AQ&amp;U</option>
+            </select>
+          </div>
+
+          <div id="correction-formula-card" class="formula-card">
+            <div class="formula-row" id="formula-barkjohn">
+              <span class="formula-name active-formula">EPA Barkjohn (2021)</span>
+              <code>PM2.5 = 0.534 × raw − 0.0844 × RH + 5.604</code>
+              <span class="formula-note">Standard for PurpleAir sensors; humidity-corrected. Used for all main analysis.</span>
+            </div>
+            <div class="formula-row" id="formula-lrapa">
+              <span class="formula-name">LRAPA</span>
+              <code>PM2.5 = 0.5 × raw − 0.66</code>
+              <span class="formula-note">Lane Regional Air Protection Agency. Simple linear, no RH correction.</span>
+            </div>
+            <div class="formula-row" id="formula-aqu">
+              <span class="formula-name">AQ&amp;U</span>
+              <code>PM2.5 = 0.778 × raw + 2.65</code>
+              <span class="formula-note">University of Utah / AQ&amp;U network correction.</span>
+            </div>
+          </div>
+
+          <div class="chart-container" style="margin-top:16px;">
+            <div class="chart-header">
+              <h3>Correction Formula Comparison</h3>
+              <div class="chart-controls">
+                <button class="btn-icon download-hd" data-chart="correction">
+                  <span>📥 HD</span>
+                </button>
+              </div>
+            </div>
+            <div class="chart" id="chart-correction"></div>
+          </div>
+        </section>
+
+        <section class="section tables">
+          <h2>Statistics and events</h2>
+          <div class="table-grid">
+            <div class="table-card">
+              <h3>Descriptive statistics</h3>
+              <div id="table-stats"></div>
+            </div>
+            <div class="table-card">
+              <h3>Exceedance summary</h3>
+              <div id="table-exceedances"></div>
+            </div>
+            <div class="table-card">
+              <h3>Pollution events</h3>
+              <div id="table-events"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section downloads">
+          <h2>Reports and Data</h2>
+          
+          <div class="download-sections">
+            <div class="download-section">
+              <h3>Research Report</h3>
+              <p>Complete analysis with full methodology, statistical analysis, and quality assessment. Suitable for peer-reviewed publication and regulatory submission.</p>
+              <div id="download-buttons-research" class="download-grid"></div>
+            </div>
+            
+            <div class="download-section">
+              <h3>Data Exports</h3>
+              <p>CSV and JSON formatted data products for further analysis, including quality flags, EPA corrections, and statistical summaries.</p>
+              <div id="download-buttons-public" class="download-grid"></div>
+            </div>
+          </div>
+          
+          <div class="chart-export-section">
+            <h3>Chart Downloads</h3>
+            <p>Export individual visualizations as high-resolution PNG files for presentations and publications.</p>
+            <div id="chart-downloads" class="download-grid"></div>
+          </div>
+        </section>
+
+        <section class="section anomalies">
+          <h2>Data anomalies</h2>
+          <ul id="anomaly-list" class="anomaly-list"></ul>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <div class="footer-top">
+          <div class="footer-brand">
+            <p class="footer-platform">PurpleAir Local Analyzer</p>
+            <p class="footer-tagline">EPA-corrected air quality analysis &amp; research reporting platform</p>
+          </div>
+        </div>
+
+        <div class="footer-team">
+          <div class="footer-person">
+            <p class="footer-role">Principal Investigator</p>
+            <p class="footer-name">Dr. Ana Rule</p>
+            <p class="footer-affil">Associate Professor</p>
+            <p class="footer-affil">Johns Hopkins Bloomberg School of Public Health</p>
+          </div>
+          <div class="footer-divider"></div>
+          <div class="footer-person">
+            <p class="footer-role">Platform Development &amp; Data Analysis</p>
+            <p class="footer-name">Chandra Prakash Choudhary</p>
+            <p class="footer-affil">Graduate Research Assistant</p>
+            <p class="footer-affil">Johns Hopkins University</p>
+            <a class="footer-contact" href="mailto:cpchoudhary2024@gmail.com">cpchoudhary2024@gmail.com</a>
+          </div>
+        </div>
+
+        <div class="footer-disclaimer">
+          <p>
+            This platform is developed for research and educational purposes. Data analysis outputs are intended to support environmental health research and should not replace regulatory monitoring or clinical decision-making. EPA Barkjohn correction (Barkjohn et al., 2021) applied to all PM<sub>2.5</sub> readings. Results are subject to sensor limitations and site-specific conditions.
+          </p>
+          <p class="footer-copy">&copy; 2025 Johns Hopkins Bloomberg School of Public Health. All rights reserved.</p>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

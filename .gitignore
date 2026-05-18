@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables
+.env
+.env.local
+
+# Runtime data (uploaded files, generated outputs)
+app/data/
+test_output/
+test_output_v2/
+test_output_v3/
+test_output_fix/
+test_output_refactor/
+test_stl_check/
+test_stl_fix/
+
+# Generated PDF reports
+report*.pdf
+report_*.pdf
+
+# Raw data files (large binary/csv - not needed in repo)
+*.xlsx
+0-Minute*.csv
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Vercel
+.vercel
