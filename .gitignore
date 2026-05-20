@@ -42,5 +42,19 @@ report_*.pdf
 # macOS
 .DS_Store
 
-# Vercel
+# Vercel (no longer used)
 .vercel
+vercel.json
+api/
+
+# Internal project docs (not needed for deployment)
+ACTION_PLAN.md
+ARCHITECTURE_DIAGRAM.md
+DOCUMENTATION_INDEX.md
+QUICK_START.md
+BEFORE_AFTER_COMPARISON.md
+IMPROVEMENTS_IMPLEMENTED.md
+PROFESSIONAL_ENHANCEMENTS.md
+PROJECT_SUMMARY.md
+RESTORATION_SUMMARY.md
+quickstart.sh

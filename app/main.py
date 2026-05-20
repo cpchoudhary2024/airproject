@@ -15,8 +15,9 @@ from fastapi.staticfiles import StaticFiles
 from .analysis import analyze_dataset, build_comparison_pdf
 
 APP_ROOT = Path(__file__).resolve().parent
-# Use /tmp on Vercel (read-only filesystem); fall back to local data dir
-DATA_ROOT = Path(os.environ.get("VERCEL", "") and "/tmp/airproject" or str(APP_ROOT / "data"))
+# DATA_DIR env var lets any deployment (HF Spaces, Docker, Vercel) set the writable path.
+# Falls back to a local data directory for development.
+DATA_ROOT = Path(os.environ.get("DATA_DIR", str(APP_ROOT / "data")))
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="PurpleAir Local Analyzer")
@@ -147,8 +148,9 @@ async def analyze(
     file: UploadFile = File(...),
     device_id: str = Form(""),
     location: str = Form(""),
+    timezone: str = Form("UTC"),
 ) -> dict:
-    metadata = {"device_id": device_id.strip(), "location": location.strip()}
+    metadata = {"device_id": device_id.strip(), "location": location.strip(), "timezone": timezone.strip()}
     file_id, job_dir, result, outputs = await _run_analysis_job(file, metadata=metadata)
 
     # Store metadata in summary.json for comparison report use
@@ -578,6 +580,82 @@ async def refine_analysis(file_id: str, date_from: str, date_to: str) -> dict:
         return {"file_id": file_id, "result": result, "outputs": outputs, "refine_dir": str(refine_dir.name)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Refinement failed: {str(e)}")
+
+
+@app.post("/api/generate-report/{file_id}")
+async def generate_custom_report(file_id: str, payload: dict) -> FileResponse:
+    """Regenerate PDF with custom notes and stored analysis parameters."""
+    from .analysis import build_report_pdf
+
+    job_dir = DATA_ROOT / file_id
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Analysis not found")
+
+    summary_path = job_dir / "summary.json"
+    if not summary_path.exists():
+        raise HTTPException(status_code=404, detail="Summary data not found")
+
+    try:
+        with summary_path.open("r", encoding="utf-8") as f:
+            stored = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read summary: {e}")
+
+    custom_notes = payload.get("custom_notes") or []
+
+    # Retrieve stored PDF params
+    pdf_params = stored.get("_pdf_params", {})
+    tz_label = pdf_params.get("tz_label", "UTC")
+    channel_agreement = pdf_params.get("channel_agreement")
+    gap_analysis = pdf_params.get("gap_analysis", {})
+    metadata = pdf_params.get("metadata") or {}
+
+    summary = stored.get("summary", {})
+
+    # quality_rows is stored under tables.quality
+    quality_rows = (stored.get("tables") or {}).get("quality") or []
+
+    # anomalies are at top level
+    anomalies = stored.get("anomalies") or []
+
+    # radar_profile is stored under charts.radar_pattern
+    radar_profile = (stored.get("charts") or {}).get("radar_pattern")
+
+    # highest_events is stored under tables.highest_events
+    highest_events = (stored.get("tables") or {}).get("highest_events") or []
+
+    # Figures must be List[Tuple[str, Path]] — same format build_report_figures returns.
+    # Map each saved PNG to its (title, path) tuple; skip files that don't exist.
+    figure_map = [
+        ("Channel A vs B",      "fig_channel_ab.png"),
+        ("Diurnal pattern",     "fig_diurnal.png"),
+        ("Sensor drift",        "fig_drift.png"),
+        ("Rolling medians",     "fig_rolling_medians.png"),
+        ("PM2.5 Temporal Radar","fig_radar_pm25_temporal.png"),
+        ("STL Residuals",       "fig_stl_residuals.png"),
+    ]
+    figures = [(title, job_dir / fn) for title, fn in figure_map if (job_dir / fn).exists()]
+
+    report_path = job_dir / "report_custom.pdf"
+    try:
+        build_report_pdf(
+            report_path,
+            summary,
+            quality_rows,
+            anomalies,
+            figures,
+            channel_agreement=channel_agreement,
+            gap_analysis=gap_analysis,
+            radar_profile=radar_profile,
+            metadata=metadata,
+            custom_notes=custom_notes,
+            tz_label=tz_label,
+            highest_events=highest_events,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
+
+    return FileResponse(path=str(report_path), filename="report_analysis.pdf", media_type="application/pdf")
 
 
 @app.post("/api/compare-report")

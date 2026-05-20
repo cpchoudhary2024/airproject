@@ -36,6 +36,84 @@
               </div>
             </div>
             <p class="meta" style="margin-top:4px;">Optional — appears at the top of the PDF report.</p>
+            <div class="device-info-row" style="margin-top:10px;">
+              <div class="input-group-inline" style="flex:1;">
+                <label for="timezone-select">Report Timezone</label>
+                <select id="timezone-select" class="text-input">
+                  <option value="UTC">UTC — Coordinated Universal Time</option>
+                  <optgroup label="North America">
+                    <option value="America/New_York">America/New_York (ET)</option>
+                    <option value="America/Chicago">America/Chicago (CT)</option>
+                    <option value="America/Denver">America/Denver (MT)</option>
+                    <option value="America/Los_Angeles">America/Los_Angeles (PT)</option>
+                    <option value="America/Anchorage">America/Anchorage (AKT)</option>
+                    <option value="Pacific/Honolulu">Pacific/Honolulu (HST)</option>
+                    <option value="America/Toronto">America/Toronto (ET)</option>
+                    <option value="America/Vancouver">America/Vancouver (PT)</option>
+                    <option value="America/Mexico_City">America/Mexico_City (CST)</option>
+                  </optgroup>
+                  <optgroup label="South America">
+                    <option value="America/Sao_Paulo">America/Sao_Paulo (BRT)</option>
+                    <option value="America/Buenos_Aires">America/Buenos_Aires (ART)</option>
+                    <option value="America/Bogota">America/Bogota (COT)</option>
+                    <option value="America/Lima">America/Lima (PET)</option>
+                    <option value="America/Santiago">America/Santiago (CLT)</option>
+                  </optgroup>
+                  <optgroup label="Europe">
+                    <option value="Europe/London">Europe/London (GMT/BST)</option>
+                    <option value="Europe/Paris">Europe/Paris (CET)</option>
+                    <option value="Europe/Berlin">Europe/Berlin (CET)</option>
+                    <option value="Europe/Amsterdam">Europe/Amsterdam (CET)</option>
+                    <option value="Europe/Rome">Europe/Rome (CET)</option>
+                    <option value="Europe/Madrid">Europe/Madrid (CET)</option>
+                    <option value="Europe/Stockholm">Europe/Stockholm (CET)</option>
+                    <option value="Europe/Warsaw">Europe/Warsaw (CET)</option>
+                    <option value="Europe/Kiev">Europe/Kiev (EET)</option>
+                    <option value="Europe/Moscow">Europe/Moscow (MSK)</option>
+                    <option value="Europe/Istanbul">Europe/Istanbul (TRT)</option>
+                    <option value="Europe/Athens">Europe/Athens (EET)</option>
+                    <option value="Europe/Helsinki">Europe/Helsinki (EET)</option>
+                  </optgroup>
+                  <optgroup label="Asia">
+                    <option value="Asia/Kolkata">Asia/Kolkata (IST)</option>
+                    <option value="Asia/Dubai">Asia/Dubai (GST)</option>
+                    <option value="Asia/Karachi">Asia/Karachi (PKT)</option>
+                    <option value="Asia/Dhaka">Asia/Dhaka (BST)</option>
+                    <option value="Asia/Colombo">Asia/Colombo (SLST)</option>
+                    <option value="Asia/Kathmandu">Asia/Kathmandu (NPT)</option>
+                    <option value="Asia/Bangkok">Asia/Bangkok (ICT)</option>
+                    <option value="Asia/Singapore">Asia/Singapore (SGT)</option>
+                    <option value="Asia/Shanghai">Asia/Shanghai (CST)</option>
+                    <option value="Asia/Tokyo">Asia/Tokyo (JST)</option>
+                    <option value="Asia/Seoul">Asia/Seoul (KST)</option>
+                    <option value="Asia/Taipei">Asia/Taipei (CST)</option>
+                    <option value="Asia/Jakarta">Asia/Jakarta (WIB)</option>
+                    <option value="Asia/Manila">Asia/Manila (PHT)</option>
+                    <option value="Asia/Riyadh">Asia/Riyadh (AST)</option>
+                    <option value="Asia/Tehran">Asia/Tehran (IRST)</option>
+                    <option value="Asia/Almaty">Asia/Almaty (ALMT)</option>
+                    <option value="Asia/Tashkent">Asia/Tashkent (UZT)</option>
+                  </optgroup>
+                  <optgroup label="Africa">
+                    <option value="Africa/Cairo">Africa/Cairo (EET)</option>
+                    <option value="Africa/Lagos">Africa/Lagos (WAT)</option>
+                    <option value="Africa/Nairobi">Africa/Nairobi (EAT)</option>
+                    <option value="Africa/Johannesburg">Africa/Johannesburg (SAST)</option>
+                    <option value="Africa/Casablanca">Africa/Casablanca (WET)</option>
+                    <option value="Africa/Accra">Africa/Accra (GMT)</option>
+                  </optgroup>
+                  <optgroup label="Oceania">
+                    <option value="Australia/Sydney">Australia/Sydney (AEST)</option>
+                    <option value="Australia/Melbourne">Australia/Melbourne (AEST)</option>
+                    <option value="Australia/Brisbane">Australia/Brisbane (AEST)</option>
+                    <option value="Australia/Perth">Australia/Perth (AWST)</option>
+                    <option value="Pacific/Auckland">Pacific/Auckland (NZST)</option>
+                    <option value="Pacific/Fiji">Pacific/Fiji (FJT)</option>
+                  </optgroup>
+                </select>
+              </div>
+            </div>
+            <p class="meta" style="margin-top:4px;">All analysis, charts, and PDF report will use this timezone for daily grouping and timestamps.</p>
           </div>
 
           <div id="dropzone" class="dropzone">
@@ -184,7 +262,7 @@
                   </button>
                 </div>
               </div>
-              <div class="chart" id="chart-calendar" style="min-height:200px;"></div>
+              <div class="chart" id="chart-calendar" style="min-height:200px;height:auto;overflow:visible;padding:16px 8px 8px;"></div>
               <div class="chart-description" id="desc-calendar"></div>
             </div>
 
@@ -255,19 +333,6 @@
               <div class="chart" id="chart-heatmap"></div>
               <div class="chart-description" id="desc-heatmap"></div>
               <div class="chart-tooltip" id="tooltip-heatmap" style="display: none;"></div>
-            </div>
-            
-            <div class="chart-container">
-              <div class="chart-header">
-                <h3>Monitor Location</h3>
-                <div class="chart-controls">
-                  <button class="btn-icon info-icon" title="Learn more" data-chart="map">
-                    <span>ℹ️</span>
-                  </button>
-                </div>
-              </div>
-              <div class="chart" id="chart-map"></div>
-              <div class="chart-description" id="desc-map"></div>
             </div>
             
             <div class="chart-container">
@@ -400,10 +465,23 @@
               <div id="table-exceedances"></div>
             </div>
             <div class="table-card">
-              <h3>Pollution events</h3>
+              <h3>All pollution events</h3>
               <div id="table-events"></div>
             </div>
           </div>
+
+          <div class="table-card" style="margin-top:24px;">
+            <h3>Highest Pollution Events (Top 10 by Peak PM2.5)</h3>
+            <p class="section-note" style="margin:0 0 12px;">Events ranked by highest recorded PM2.5 concentration, with timestamp and duration.</p>
+            <div id="table-highest-events"></div>
+          </div>
+        </section>
+
+        <section class="section custom-notes-section" id="custom-notes-section">
+          <h2>Custom Notes for Report</h2>
+          <p class="section-note">Add notes, observations, or commentary here. Each note will appear as a dedicated section in the generated PDF report.</p>
+          <div id="custom-notes-list"></div>
+          <button type="button" class="btn secondary" id="add-note-btn" style="margin-top:12px;">+ Add Note</button>
         </section>
 
         <section class="section downloads">
@@ -451,7 +529,7 @@
         <div class="footer-team">
           <div class="footer-person">
             <p class="footer-role">Principal Investigator</p>
-            <p class="footer-name">Dr. Ana Rule</p>
+            <p class="footer-name">Dr. Ana Maria Rule</p>
             <p class="footer-affil">Associate Professor</p>
             <p class="footer-affil">Johns Hopkins Bloomberg School of Public Health</p>
           </div>

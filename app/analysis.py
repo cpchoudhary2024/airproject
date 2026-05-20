@@ -180,6 +180,22 @@ def apply_aqu_correction(pm: pd.Series) -> pd.Series:
     return (0.778 * pm + 2.65).clip(lower=0)
 
 
+def _ts_str(datetime_like) -> list:
+    """Convert timestamps to naive-local strings WITHOUT timezone offset, for Plotly display.
+
+    Plotly.js re-converts tz-aware strings (e.g. '+05:30') back to browser-UTC, undoing
+    any server-side timezone conversion.  Stripping the offset makes Plotly treat the
+    already-converted local time as-is.
+    """
+    try:
+        if isinstance(datetime_like, pd.DatetimeIndex):
+            return datetime_like.strftime('%Y-%m-%dT%H:%M:%S').tolist()
+        idx = pd.DatetimeIndex(datetime_like)
+        return idx.strftime('%Y-%m-%dT%H:%M:%S').tolist()
+    except Exception:
+        return pd.Series(datetime_like).astype(str).tolist()
+
+
 def build_calendar_data(daily_aqi: pd.Series) -> dict:
     """GitHub-style calendar heatmap: list of {date, aqi, category, color, weekday, week_seq} per day."""
     if daily_aqi.empty:
@@ -222,47 +238,133 @@ def build_calendar_data(daily_aqi: pd.Series) -> dict:
     return {"days": days}
 
 
-def build_narrative_summary(pm_corr_avg, pm_raw_avg, aqi_avg, aqi_cat,
-                             start_iso, end_iso, n_total,
-                             n_events, pm25_max, cv, coverage, quality_score) -> str:
-    """Plain-English one-paragraph summary of the analysis."""
+def build_narrative_summary(
+    pm_corr_avg, pm_raw_avg, aqi_avg, aqi_cat,
+    start_iso, end_iso, n_total,
+    n_events, pm25_max, cv, coverage, quality_score,
+    who_15_hours: int = 0, epa_35_hours: int = 0,
+    n_days: int = 0, aqi_current: int = 0,
+) -> str:
+    """Comprehensive plain-English summary covering air quality, health risk, sensor health, and data quality."""
     try:
         try:
-            start_fmt = pd.Timestamp(start_iso).strftime("%b %d, %Y") if start_iso else "?"
-            end_fmt   = pd.Timestamp(end_iso).strftime("%b %d, %Y")   if end_iso   else "?"
+            start_fmt = pd.Timestamp(start_iso).strftime("%B %d, %Y") if start_iso else "?"
+            end_fmt   = pd.Timestamp(end_iso).strftime("%B %d, %Y")   if end_iso   else "?"
         except Exception:
             start_fmt, end_fmt = str(start_iso), str(end_iso)
 
-        pm_val = pm_corr_avg if pm_corr_avg else pm_raw_avg
-        parts = [
-            f"Between {start_fmt} and {end_fmt}, this PurpleAir monitor recorded "
-            f"{n_total:,} PM2.5 measurements at 2-minute intervals.",
+        pm_val = pm_corr_avg if pm_corr_avg is not None else pm_raw_avg
 
-            f"The mean EPA Barkjohn-corrected PM2.5 was {pm_val:.1f} µg/m³, "
-            f"corresponding to an average AQI of {int(aqi_avg)} ({aqi_cat}).",
+        # ── 1. Monitoring overview ────────────────────────────────────────────
+        days_label = f"{n_days} days" if n_days > 1 else "1 day"
+        parts = [
+            f"MONITORING OVERVIEW: Between {start_fmt} and {end_fmt} ({days_label}), "
+            f"this PurpleAir sensor recorded {n_total:,} PM2.5 measurements (approximately every 2 minutes)."
         ]
 
-        if n_events > 0:
-            peak = f"; peak daily average {pm25_max:.1f} µg/m³" if pm25_max > 0 else ""
-            parts.append(
-                f"STL decomposition identified {n_events} pollution episodes "
-                f"exceeding the 2σ anomaly threshold{peak}."
-            )
-        else:
-            parts.append("No statistically significant pollution events (>2σ) were detected.")
+        # ── 2. Air quality results ────────────────────────────────────────────
+        # AQI health guidance mapping
+        _aqi_guidance = {
+            "Good":              "posing no significant health risk — outdoor activities are safe for everyone.",
+            "Moderate":          "acceptable for most people, though unusually sensitive individuals may notice minor effects.",
+            "USG":               "unhealthy for sensitive groups (children, elderly, people with asthma or heart disease); "
+                                 "the general public is less likely to be affected.",
+            "Unhealthy":         "unhealthy for everyone; sensitive groups may experience more serious health effects. "
+                                 "Limit prolonged outdoor exertion.",
+            "Very Unhealthy":    "very unhealthy — health warnings in effect for the entire population. "
+                                 "Avoid all outdoor physical activity if possible.",
+            "Hazardous":         "hazardous — emergency health conditions for the entire population. "
+                                 "Stay indoors and keep windows closed.",
+        }
+        health_msg = _aqi_guidance.get(aqi_cat, "of uncertain category — check AQI thresholds.")
 
-        if cv is not None:
-            desc = "excellent" if cv < 10 else ("acceptable" if cv < 15 else "poor — maintenance recommended")
-            parts.append(
-                f"Dual-sensor channel agreement was {desc} (CV = {cv:.1f}%), "
-                f"confirming {'research-grade data reliability' if cv < 10 else 'acceptable measurement quality'}."
-            )
+        who_comparison = ""
+        if pm_val is not None:
+            if pm_val <= 15:
+                who_comparison = f"This average is within the WHO 24-hour guideline of 15 µg/m³."
+            elif pm_val <= 35:
+                who_comparison = (
+                    f"This exceeds the WHO guideline (15 µg/m³) but is within the EPA 24-hour standard (35 µg/m³). "
+                    f"Chronic exposure at this level carries a moderate long-term health risk."
+                )
+            else:
+                who_comparison = (
+                    f"This exceeds both the WHO guideline (15 µg/m³) and the EPA 24-hour standard (35 µg/m³), "
+                    f"indicating persistently poor air quality with potential health consequences for all residents."
+                )
 
         parts.append(
-            f"Temporal coverage was {coverage:.1f}% over the monitoring window "
-            f"(composite quality score: {quality_score:.1f}/100)."
+            f"\nAIR QUALITY: The mean EPA Barkjohn-corrected PM2.5 was {pm_val:.1f} µg/m³ "
+            f"(average AQI {int(aqi_avg)} — {aqi_cat}), {health_msg} "
+            f"{who_comparison}"
         )
-        return " ".join(parts)
+
+        # ── 3. Peak and exceedances ───────────────────────────────────────────
+        peak_note = ""
+        if pm25_max and pm25_max > 0:
+            peak_note = f" The single highest recorded PM2.5 was {pm25_max:.1f} µg/m³."
+        exceed_parts = []
+        if who_15_hours > 0:
+            exceed_parts.append(f"{who_15_hours} hours exceeded the WHO 24-h guideline of 15 µg/m³")
+        if epa_35_hours > 0:
+            exceed_parts.append(f"{epa_35_hours} hours exceeded the EPA standard of 35 µg/m³")
+        if exceed_parts:
+            exceedance_note = "During the monitoring period, " + " and ".join(exceed_parts) + "."
+        elif who_15_hours == 0 and epa_35_hours == 0:
+            exceedance_note = "PM2.5 remained below the EPA 35 µg/m³ standard throughout the entire monitoring period."
+        else:
+            exceedance_note = ""
+        parts.append(f"\nPOLLUTION EVENTS:{peak_note} {exceedance_note}")
+
+        # ── 4. Detected events ────────────────────────────────────────────────
+        if n_events > 0:
+            parts.append(
+                f"Automated anomaly detection (STL decomposition) identified {n_events} pollution episode(s) "
+                f"that exceeded the 2-standard-deviation threshold above background levels. "
+                f"'Spike' events are sharp, short-duration surges (typically minutes to 1–2 hours) caused "
+                f"by nearby sources such as traffic, cooking, or burning. "
+                f"'Sustained' events last 3+ hours and often indicate regional pollution transport, "
+                f"wildfires, or prolonged industrial activity."
+            )
+        else:
+            parts.append(
+                "Automated anomaly detection found no statistically significant pollution episodes — "
+                "PM2.5 remained within normal background variation throughout the monitoring period."
+            )
+
+        # ── 5. Sensor health ─────────────────────────────────────────────────
+        if cv is not None:
+            if cv < 10:
+                cv_label = "excellent (research-grade)"
+                cv_meaning = "Both sensor channels are in close agreement, confirming high data reliability."
+            elif cv < 15:
+                cv_label = "acceptable"
+                cv_meaning = "Minor channel divergence exists but falls within acceptable limits for field sensors."
+            else:
+                cv_label = "poor — sensor maintenance is recommended"
+                cv_meaning = (
+                    "Significant disagreement between channels A and B suggests sensor degradation, "
+                    "contamination, or a hardware fault. Data should be used with caution."
+                )
+            parts.append(
+                f"\nSENSOR HEALTH: Dual-channel agreement was {cv_label} (CV = {cv:.1f}%). {cv_meaning}"
+            )
+
+        # ── 6. Data quality ───────────────────────────────────────────────────
+        if quality_score >= 90:
+            q_label = "excellent — suitable for peer-reviewed publication and regulatory submission"
+        elif quality_score >= 80:
+            q_label = "good — suitable for most research and community reporting purposes"
+        elif quality_score >= 70:
+            q_label = "acceptable — note data gaps or quality flags in any formal publication"
+        else:
+            q_label = "low — interpret results with caution; significant data gaps or quality issues present"
+        parts.append(
+            f"\nDATA QUALITY: Temporal coverage was {coverage:.1f}% of the monitoring window "
+            f"(composite quality score: {quality_score:.1f}/100 — {q_label})."
+        )
+
+        return "\n".join(parts)
     except Exception:
         return ""
 
@@ -341,12 +443,13 @@ def summarize_stats(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
 
 
 def detect_events(df: pd.DataFrame, pm_col: str) -> pd.DataFrame:
+    _empty_cols = ["start", "end", "duration_hours", "peak_pm25", "min_pm25", "pm25_range", "peak_timestamp", "type"]
     if pm_col not in df.columns:
-        return pd.DataFrame(columns=["start", "end", "duration_hours", "type"])
+        return pd.DataFrame(columns=_empty_cols)
 
     series = df[pm_col].dropna()
     if series.empty:
-        return pd.DataFrame(columns=["start", "end", "duration_hours", "type"])
+        return pd.DataFrame(columns=_empty_cols)
 
     rolling_med = series.rolling(12, min_periods=6).median()
     rolling_std = series.rolling(12, min_periods=6).std().fillna(0)
@@ -366,16 +469,44 @@ def detect_events(df: pd.DataFrame, pm_col: str) -> pd.DataFrame:
                 if label == "Sustained" and duration < 3:
                     start = None
                     continue
-                events.append({"start": start, "end": end, "duration_hours": duration, "type": label})
+                segment = series[start:end]
+                if not segment.empty:
+                    peak_idx = segment.idxmax()
+                    peak_val = round(float(segment.max()), 2)
+                    min_val  = round(float(segment.min()), 2)
+                else:
+                    peak_idx, peak_val, min_val = start, float("nan"), float("nan")
+                events.append({
+                    "start": start, "end": end,
+                    "duration_hours": round(duration, 2),
+                    "peak_pm25": peak_val,
+                    "min_pm25":  min_val,
+                    "pm25_range": round(peak_val - min_val, 2) if not math.isnan(peak_val) else float("nan"),
+                    "peak_timestamp": peak_idx, "type": label,
+                })
                 start = None
         if start is not None:
             end = mask.index[-1]
             duration = (end - start).total_seconds() / 3600.0
             if label == "Sustained" and duration >= 3:
-                events.append({"start": start, "end": end, "duration_hours": duration, "type": label})
+                segment = series[start:end]
+                if not segment.empty:
+                    peak_idx = segment.idxmax()
+                    peak_val = round(float(segment.max()), 2)
+                    min_val  = round(float(segment.min()), 2)
+                else:
+                    peak_idx, peak_val, min_val = start, float("nan"), float("nan")
+                events.append({
+                    "start": start, "end": end,
+                    "duration_hours": round(duration, 2),
+                    "peak_pm25": peak_val,
+                    "min_pm25":  min_val,
+                    "pm25_range": round(peak_val - min_val, 2) if not math.isnan(peak_val) else float("nan"),
+                    "peak_timestamp": peak_idx, "type": label,
+                })
 
     if not events:
-        return pd.DataFrame(columns=["start", "end", "duration_hours", "type"])
+        return pd.DataFrame(columns=_empty_cols)
 
     events_df = pd.DataFrame(events)
     return events_df.sort_values("start")
@@ -1148,52 +1279,49 @@ def build_radar_profile(cleaned: pd.DataFrame, quality_score: float, channel_agr
     }
 
 
-def build_pm25_temporal_radar(cleaned: pd.DataFrame, latitude: Optional[float] = None, longitude: Optional[float] = None) -> Dict[str, Any]:
-    """Build radar chart for PM2.5 levels by hour of day with automatic LST conversion if coordinates available.
-    
-    RESEARCH-GRADE: Converts UTC hours to Local Standard Time based on GPS coordinates when available.
+def build_pm25_temporal_radar(
+    cleaned: pd.DataFrame,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    tz_label: str = "UTC",
+) -> Dict[str, Any]:
+    """Build radar chart for PM2.5 levels by hour of day.
+
+    Uses the already-converted index (local time) for grouping, so hours are
+    correct regardless of GPS availability.  The label shows the user-selected
+    timezone; falls back to a GPS-derived offset when available.
     """
     if cleaned.empty:
         return {"labels": [], "values": [], "max_value": 0}
-    
-    # Determine UTC offset if coordinates available
-    utc_offset = None
-    if latitude is not None and longitude is not None:
-        utc_offset = get_utc_to_lst_offset_hours(latitude, longitude)
-    
-    # Get hourly patterns with actual PM2.5 values
+
+    # Hours are already in local time after tz_convert in analyze_dataset
     temp_df = cleaned.copy()
     temp_df["hour"] = temp_df.index.hour
-    
-    # Average PM2.5 by hour (0-23) - use actual µg/m³ values
-    hourly_avg = temp_df.groupby("hour")["pm25"].mean()
-    
-    # Convert to LST if offset available
-    if utc_offset is not None:
-        hours_lst = [(h + int(utc_offset)) % 24 for h in range(24)]
-        hourly_avg_reindexed = pd.Series(index=hours_lst, dtype=float)
-        for utc_h in range(24):
-            lst_h = (utc_h + int(utc_offset)) % 24
-            hourly_avg_reindexed[lst_h] = hourly_avg.get(utc_h, 0)
-        hourly_avg = hourly_avg_reindexed
-        hourly_avg = hourly_avg.sort_index()
-        offset_label = f" LST (UTC{utc_offset:+.0f})"
+    hourly_avg = temp_df.groupby("hour")["pm25"].mean().reindex(range(24), fill_value=0)
+
+    # Build a readable timezone label for the chart axis
+    if tz_label and tz_label != "UTC":
+        # Show the last component (e.g. "New_York" from "America/New_York")
+        short_tz = tz_label.split("/")[-1].replace("_", " ")
+        offset_label = f" ({short_tz})"
+    elif latitude is not None and longitude is not None:
+        utc_offset = get_utc_to_lst_offset_hours(latitude, longitude)
+        if utc_offset is not None:
+            offset_label = f" LST (UTC{utc_offset:+.0f})"
+        else:
+            offset_label = " UTC"
     else:
-        hourly_avg = hourly_avg.reindex(range(24), fill_value=0)
         offset_label = " UTC"
-    
-    # Get the maximum value for radial axis scaling
-    max_pm = max(hourly_avg.max(), 0.1)  # Avoid zero for empty datasets
-    
-    # Create labels for each hour
+
+    max_pm = max(hourly_avg.max(), 0.1)
     labels = [f"{int(h):02d}:00{offset_label}" for h in hourly_avg.index]
-    
+
     return {
         "labels": labels,
         "values": hourly_avg.tolist(),
         "max_value": max_pm,
         "type": "hourly_pm25_pattern",
-        "offset_label": offset_label
+        "offset_label": offset_label,
     }
 
 
@@ -1370,11 +1498,11 @@ def build_report_figures(
         ax.grid(True, linewidth=2.0, alpha=0.5)
 
         offset_label = pm25_radar.get("offset_label", " UTC")
-        if "LST" in offset_label:
-            title = f"PM2.5 Temporal Pattern - 24-Hour Average ({offset_label})"
+        if offset_label.strip() == "UTC":
+            tz_display = "UTC"
         else:
-            title = "PM2.5 Temporal Pattern - 24-Hour Average (UTC Hours — No Local Offset)"
-        ax.set_title(title, fontsize=14, fontweight='bold', pad=30)
+            tz_display = offset_label.strip().strip("()")
+        ax.set_title(f"PM2.5 Temporal Pattern — 24-Hour Average ({tz_display})", fontsize=14, fontweight='bold', pad=30)
 
         for angle, value, label in zip(angles[:-1], values[:-1], pm25_radar["labels"]):
             if value > 0:
@@ -1449,26 +1577,55 @@ def build_report_pdf(
     gap_analysis: Dict[str, Any] = None,
     radar_profile: Dict[str, Any] = None,
     metadata: Dict[str, str] = None,
+    custom_notes: Optional[List[Dict[str, str]]] = None,
+    tz_label: str = "UTC",
+    highest_events: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     pdf = canvas.Canvas(str(report_path), pagesize=letter)
     width, height = letter
-    L_MARGIN = 54      # left margin in points
-    R_MARGIN = 54      # right margin in points
-    T_MARGIN = 54      # top margin (first use position from top)
-    B_MARGIN = 72      # bottom safe zone
-    USABLE_W = width - L_MARGIN - R_MARGIN   # 504 pts
+
+    # ── Layout constants ──────────────────────────────────────────────────────
+    L_MARGIN  = 62     # left margin
+    R_MARGIN  = 62     # right margin
+    T_MARGIN  = 58     # top of usable area from top of page
+    B_MARGIN  = 80     # bottom safe-zone: stop drawing above this
+    USABLE_W  = width - L_MARGIN - R_MARGIN      # 488 pts
+    CONTENT_X = L_MARGIN + 14                    # indented content X
+    SECTION_INDENT = 16                          # body-text indent relative to L_MARGIN
+
+    # ── Brand colours ─────────────────────────────────────────────────────────
+    C_NAVY   = (0.08, 0.18, 0.38)   # dark navy for titles / accents
+    C_RULE   = (0.76, 0.76, 0.76)   # light gray for horizontal rules
+    C_BODY   = (0.12, 0.12, 0.12)   # near-black for body text
+    C_MUTED  = (0.42, 0.42, 0.42)   # muted gray for secondary text
+    C_GREEN  = (0.03, 0.48, 0.20)
+    C_AMBER  = (0.62, 0.38, 0.00)
+    C_RED    = (0.70, 0.10, 0.10)
+    C_WHITE  = (1.00, 1.00, 1.00)
+
     y = height - T_MARGIN
     page_num = [1]
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
+    def _set_fill(rgb):
+        pdf.setFillColorRGB(*rgb)
+
+    def _set_stroke(rgb):
+        pdf.setStrokeColorRGB(*rgb)
+
     def _stamp_footer() -> None:
-        """Draw page number + generation note at the very bottom of the current page."""
         pdf.setFont("Helvetica", 7)
-        pdf.setFillColorRGB(0.55, 0.55, 0.55)
-        pdf.drawString(L_MARGIN, 28, "PurpleAir Local Analyzer  |  All times UTC  |  For research use: cite quality score and note significant gaps.")
-        pdf.drawRightString(width - R_MARGIN, 28, f"Page {page_num[0]}")
-        pdf.setFillColorRGB(0, 0, 0)
+        _set_fill(C_MUTED)
+        _footer_tz = tz_label if (tz_label and tz_label != "UTC") else "UTC"
+        pdf.drawString(L_MARGIN, 30, f"PurpleAir Local Analyzer  ·  All times {_footer_tz}  ·  For research use: cite quality score and note significant data gaps.")
+        pdf.drawRightString(width - R_MARGIN, 30, f"Page {page_num[0]}")
+        # thin footer rule
+        pdf.setLineWidth(0.3)
+        _set_stroke(C_RULE)
+        pdf.line(L_MARGIN, 40, width - R_MARGIN, 40)
+        _set_fill(C_BODY)
+        _set_stroke((0, 0, 0))
 
     def next_page() -> None:
         nonlocal y
@@ -1477,89 +1634,280 @@ def build_report_pdf(
         page_num[0] += 1
         y = height - T_MARGIN
 
-    def draw_rule(weight: float = 0.4) -> None:
+    def _check_space(needed: int = 24) -> None:
+        if y < B_MARGIN + needed:
+            next_page()
+
+    def draw_h_rule(weight: float = 0.35, color: tuple = None) -> None:
+        """Draw a full-width horizontal rule and advance y by 5pt total."""
         nonlocal y
+        c = color or C_RULE
         pdf.setLineWidth(weight)
-        pdf.setStrokeColorRGB(0.75, 0.75, 0.75)
+        _set_stroke(c)
         pdf.line(L_MARGIN, y, width - R_MARGIN, y)
-        pdf.setStrokeColorRGB(0, 0, 0)
-        y -= 3
+        _set_stroke((0, 0, 0))
+        y -= 5
 
-    def draw_line(text: str, indent: int = 0, font_size: int = 10, bold: bool = False, color: tuple = (0, 0, 0)) -> None:
-        nonlocal y
-        if y < B_MARGIN:
-            next_page()
-        font_name = "Helvetica-Bold" if bold else "Helvetica"
-        pdf.setFont(font_name, font_size)
-        pdf.setFillColorRGB(*color)
-        pdf.drawString(L_MARGIN + indent, y, text)
-        pdf.setFillColorRGB(0, 0, 0)
-        y -= font_size + 4
+    # Backward-compat alias used throughout the function body
+    def draw_rule(weight: float = 0.5, color: tuple = None) -> None:
+        draw_h_rule(weight, color)
 
-    def draw_wrapped(text: str, indent: int = 0, font_size: int = 9, color: tuple = (0, 0, 0)) -> None:
+    def draw_line(text: str, x: int = None, font_size: int = 10,
+                  bold: bool = False, color: tuple = None,
+                  line_gap: int = None, indent: int = None) -> None:
+        """Draw a single line of text; auto-page-break if needed.
+        `indent` is a legacy alias — absolute x = L_MARGIN + indent."""
         nonlocal y
-        pdf.setFont("Helvetica", font_size)
-        # Dynamic wrap width: Helvetica avg char ≈ 0.56 × point size
-        max_chars = max(40, int((USABLE_W - indent) / (font_size * 0.56)))
-        pdf.setFillColorRGB(*color)
+        _check_space(font_size + 8)
+        fn = "Helvetica-Bold" if bold else "Helvetica"
+        pdf.setFont(fn, font_size)
+        _set_fill(color or C_BODY)
+        if indent is not None:
+            resolved_x = L_MARGIN + indent
+        else:
+            resolved_x = x if x is not None else CONTENT_X
+        pdf.drawString(resolved_x, y, text)
+        _set_fill(C_BODY)
+        y -= (line_gap if line_gap is not None else font_size + 5)
+
+    def draw_wrapped(text: str, x_offset: int = 0, font_size: int = 9,
+                     color: tuple = None, bold: bool = False,
+                     para_gap: int = 9, indent: int = None) -> None:
+        """Word-wrap text within the usable column, with auto-page-break.
+        `indent` is a legacy alias — absolute x = L_MARGIN + indent."""
+        nonlocal y
+        fn = "Helvetica-Bold" if bold else "Helvetica"
+        pdf.setFont(fn, font_size)
+        if indent is not None:
+            col_x = L_MARGIN + indent
+            effective_offset = indent - (CONTENT_X - L_MARGIN)
+        else:
+            col_x = CONTENT_X + x_offset
+            effective_offset = x_offset
+        max_chars = max(40, int((USABLE_W - max(0, effective_offset)) / (font_size * 0.558)))
+        _set_fill(color or C_BODY)
         for line in textwrap.wrap(text, width=max_chars):
-            if y < B_MARGIN:
-                next_page()
-                pdf.setFont("Helvetica", font_size)
-            pdf.drawString(L_MARGIN + indent, y, line)
-            y -= font_size + 3
-        pdf.setFillColorRGB(0, 0, 0)
-        y -= 5     # paragraph gap
+            _check_space(font_size + 4)
+            pdf.setFont(fn, font_size)      # restore after possible next_page()
+            pdf.drawString(col_x, y, line)
+            y -= font_size + 4
+        _set_fill(C_BODY)
+        y -= para_gap      # inter-paragraph breathing room
 
-    def section_header(num: str, title: str) -> None:
+    def section_header(num: str, title: str, start_new_page: bool = False) -> None:
+        """Render a numbered section heading with accent bar and ruled underline."""
         nonlocal y
-        # Need enough room for: pre-gap(10) + title(16) + rule(1) + post-gap(6) + ≥2 content lines(26) = 59pt
-        if y < B_MARGIN + 60:
+        if start_new_page:
             next_page()
-        # Pre-section breathing room (visually separates from previous content)
-        y -= 10
-        # Blue accent bar (3 pt wide, 15 pt tall, vertically centred on the title cap-height)
-        pdf.setFillColorRGB(0.10, 0.22, 0.45)
-        pdf.rect(L_MARGIN, y - 2, 3, 15, fill=1, stroke=0)
-        # Section title
-        pdf.setFont("Helvetica-Bold", 13)
-        pdf.drawString(L_MARGIN + 8, y, f"{num}  {title}")
-        pdf.setFillColorRGB(0, 0, 0)
-        # Rule sits 13 pt below the title baseline — safely below descenders (≈3 pt)
-        y -= 13
-        draw_rule(0.5)
-        # draw_rule already moves y down by 3 pt; add 2 more for comfortable content start
-        y -= 2
+        else:
+            # Need at least 80pt for header + its first content block
+            _check_space(80)
+        # ── Pre-section breathing room ────────────────────────────────────────
+        y -= 18
+        # Accent bar: 4pt wide, 17pt tall, flush with left margin
+        pdf.setLineWidth(0)
+        _set_fill(C_NAVY)
+        pdf.rect(L_MARGIN, y - 3, 4, 18, fill=1, stroke=0)
+        # Section number (smaller, muted)
+        pdf.setFont("Helvetica-Bold", 9)
+        pdf.drawString(L_MARGIN + 10, y + 4, num)
+        # Section title (larger)
+        pdf.setFont("Helvetica-Bold", 14)
+        pdf.drawString(L_MARGIN + 10 + (len(num) * 6), y + 4, f"  {title}")
+        _set_fill(C_BODY)
+        # ── Ruled underline — placed 8pt below baseline, giving clear gap ─────
+        y -= 20     # move below title text (14pt font + 6pt gap)
+        pdf.setLineWidth(0.6)
+        _set_stroke(C_NAVY)
+        pdf.line(L_MARGIN, y, width - R_MARGIN, y)
+        _set_stroke((0, 0, 0))
+        y -= 10     # clear gap below rule before first content line
 
-    # ── Cover / Title ─────────────────────────────────────────────────────────
+    def draw_sub_heading(text: str, font_size: int = 10) -> None:
+        """Bold sub-heading within a section (no rule, just bold + spacing)."""
+        nonlocal y
+        _check_space(font_size + 18)
+        y -= 6      # top breathing room before sub-heading
+        pdf.setFont("Helvetica-Bold", font_size)
+        _set_fill(C_NAVY)
+        pdf.drawString(CONTENT_X, y, text)
+        _set_fill(C_BODY)
+        y -= font_size + 5
 
-    pdf.setFont("Helvetica-Bold", 22)
-    pdf.setFillColorRGB(0.10, 0.22, 0.45)
-    pdf.drawString(L_MARGIN, y, "Air Quality Research Report")
-    pdf.setFillColorRGB(0, 0, 0)
-    y -= 30
-    pdf.setFont("Helvetica", 10)
-    pdf.setFillColorRGB(0.35, 0.35, 0.35)
-    pdf.drawString(L_MARGIN, y, f"Monitoring Period:  {summary['date_range']['start']}  to  {summary['date_range']['end']}")
-    pdf.setFillColorRGB(0, 0, 0)
-    y -= 14
-    # Metadata: device ID and location (user-provided)
+    def draw_bullet(text: str, font_size: int = 9) -> None:
+        """Indented bullet point."""
+        nonlocal y
+        _check_space(font_size + 8)
+        pdf.setFont("Helvetica", font_size)
+        _set_fill(C_BODY)
+        pdf.drawString(CONTENT_X + 6, y, f"•  {text}")
+        y -= font_size + 5
+
+    def _fmt_period(ts_str: str) -> str:
+        try:
+            return pd.Timestamp(ts_str).strftime("%d %B %Y  %H:%M")
+        except Exception:
+            return ts_str
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # COVER PAGE
+    # ═════════════════════════════════════════════════════════════════════════
+
+    # Full-width dark header band
+    HEADER_H = 90
+    _set_fill(C_NAVY)
+    pdf.rect(0, height - HEADER_H, width, HEADER_H, fill=1, stroke=0)
+
+    # Main report title (white on navy)
+    pdf.setFont("Helvetica-Bold", 24)
+    _set_fill(C_WHITE)
+    pdf.drawString(L_MARGIN, height - 52, "Air Quality Research Report")
+
+    # Subtitle line
+    pdf.setFont("Helvetica", 11)
+    _set_fill((0.80, 0.88, 0.96))
+    pdf.drawString(L_MARGIN, height - 70, "Comprehensive PM2.5 Analysis  ·  Sensor-Grade Data Quality Assessment")
+    _set_fill(C_BODY)
+
+    y = height - HEADER_H - 28    # start content below the header band
+
+    # ── Metadata block ────────────────────────────────────────────────────────
+    _start_fmt = _fmt_period(summary['date_range']['start'])
+    _end_fmt   = _fmt_period(summary['date_range']['end'])
+
+    # Monitoring period (prominent)
+    pdf.setFont("Helvetica-Bold", 11)
+    _set_fill(C_NAVY)
+    pdf.drawString(L_MARGIN, y, "Monitoring Period")
+    _set_fill(C_BODY)
+    pdf.setFont("Helvetica", 11)
+    pdf.drawString(L_MARGIN + 130, y, f"{_start_fmt}  →  {_end_fmt}")
+    y -= 18
+
     if metadata:
         _dev = (metadata.get("device_id") or "").strip()
         _loc = (metadata.get("location") or "").strip()
-        if _dev or _loc:
+        if _dev:
             pdf.setFont("Helvetica-Bold", 10)
-            pdf.setFillColorRGB(0.10, 0.22, 0.45)
-            if _dev:
-                pdf.drawString(L_MARGIN, y, f"Device ID:  {_dev}")
-                y -= 14
-            if _loc:
-                pdf.drawString(L_MARGIN, y, f"Location:   {_loc}")
-                y -= 14
-            pdf.setFillColorRGB(0, 0, 0)
-    y -= 2
-    draw_rule(1.0)
-    y -= 2
+            _set_fill(C_NAVY)
+            pdf.drawString(L_MARGIN, y, "Device ID")
+            pdf.setFont("Helvetica", 10)
+            _set_fill(C_BODY)
+            pdf.drawString(L_MARGIN + 130, y, _dev)
+            y -= 16
+        if _loc:
+            pdf.setFont("Helvetica-Bold", 10)
+            _set_fill(C_NAVY)
+            pdf.drawString(L_MARGIN, y, "Location")
+            pdf.setFont("Helvetica", 10)
+            _set_fill(C_BODY)
+            pdf.drawString(L_MARGIN + 130, y, _loc)
+            y -= 16
+
+    _tz_display = tz_label if (tz_label and tz_label != "UTC") else "UTC — Coordinated Universal Time"
+    pdf.setFont("Helvetica-Bold", 10)
+    _set_fill(C_NAVY)
+    pdf.drawString(L_MARGIN, y, "Report Timezone")
+    pdf.setFont("Helvetica", 10)
+    _set_fill(C_BODY)
+    pdf.drawString(L_MARGIN + 130, y, _tz_display)
+    y -= 22
+
+    # Thin separator rule
+    pdf.setLineWidth(0.5)
+    _set_stroke(C_NAVY)
+    pdf.line(L_MARGIN, y, width - R_MARGIN, y)
+    _set_stroke((0, 0, 0))
+    y -= 14
+
+    # Quick-stats row (3 tiles)
+    _qs = [
+        ("Average PM2.5",  f"{summary.get('pm25_average', '—')} µg/m³"),
+        ("Average AQI",    f"{summary.get('aqi_average', '—')} — {summary.get('aqi_category', '—')}"),
+        ("Quality Score",  f"{summary.get('quality_score', '—')}%"),
+    ]
+    tile_w = (USABLE_W - 12) / 3
+    tile_x = L_MARGIN
+    for label, val in _qs:
+        # Tile background
+        _set_fill((0.95, 0.96, 0.98))
+        pdf.rect(tile_x, y - 34, tile_w - 6, 42, fill=1, stroke=0)
+        # Value
+        pdf.setFont("Helvetica-Bold", 13)
+        _set_fill(C_NAVY)
+        pdf.drawString(tile_x + 8, y - 8, val)
+        # Label
+        pdf.setFont("Helvetica", 8)
+        _set_fill(C_MUTED)
+        pdf.drawString(tile_x + 8, y - 22, label)
+        tile_x += tile_w
+    _set_fill(C_BODY)
+    y -= 50
+
+    # Attribution
+    pdf.setFont("Helvetica", 8.5)
+    _set_fill(C_MUTED)
+    pdf.drawString(L_MARGIN, y, "Principal Investigator: Dr. Ana Maria Rule   ·   Data Analysis & Platform: Chandra Prakash Choudhary")
+    y -= 12
+    pdf.setFont("Helvetica", 8)
+    pdf.drawString(L_MARGIN, y, "This report was generated automatically using EPA-validated correction algorithms and research-grade quality metrics.")
+    _set_fill(C_BODY)
+    y -= 20
+
+    # Cover-page separator rule (heavier)
+    pdf.setLineWidth(1.2)
+    _set_stroke(C_NAVY)
+    pdf.line(L_MARGIN, y, width - R_MARGIN, y)
+    _set_stroke((0, 0, 0))
+    y -= 16
+
+    # ── Analysis Summary (plain-English, for non-experts) ────────────────────
+
+    _narrative_text = summary.get("narrative_summary", "")
+    if _narrative_text:
+        if y < 200:
+            next_page()
+        _nl_sections = [s.strip() for s in _narrative_text.split("\n") if s.strip()]
+
+        # Title bar (dark blue background, white text) — drawn BEFORE text
+        _box_top = y + 6
+        pdf.setFillColorRGB(0.10, 0.22, 0.45)
+        pdf.rect(L_MARGIN, y - 4, USABLE_W, 22, fill=1, stroke=0)
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.setFillColorRGB(1, 1, 1)
+        pdf.drawString(L_MARGIN + 10, y + 2, "ANALYSIS SUMMARY  —  Plain-Language Overview")
+        pdf.setFillColorRGB(0, 0, 0)
+        y -= 26
+
+        for section_text in _nl_sections:
+            if y < B_MARGIN + 24:
+                next_page()
+            _colon_pos = section_text.find(":")
+            # Detect "ALL CAPS LABEL:" at start of section
+            if _colon_pos > 0 and section_text[:_colon_pos].replace(" ", "").isupper() and _colon_pos < 25:
+                label_part   = section_text[:_colon_pos + 1]
+                content_part = section_text[_colon_pos + 1:].strip()
+                y -= 4
+                pdf.setFont("Helvetica-Bold", 9.5)
+                pdf.setFillColorRGB(0.10, 0.22, 0.45)
+                pdf.drawString(L_MARGIN + 10, y, label_part)
+                pdf.setFillColorRGB(0, 0, 0)
+                y -= 13
+                if content_part:
+                    draw_wrapped(content_part, indent=10, font_size=9)
+            else:
+                draw_wrapped(section_text, indent=10, font_size=9)
+
+        # Draw only left, right, and bottom borders — no top line (the navy title bar is the top)
+        _box_bottom = y - 4
+        pdf.setStrokeColorRGB(0.10, 0.22, 0.45)
+        pdf.setLineWidth(0.8)
+        pdf.line(L_MARGIN, _box_top, L_MARGIN, _box_bottom)                    # left
+        pdf.line(L_MARGIN + USABLE_W, _box_top, L_MARGIN + USABLE_W, _box_bottom)  # right
+        pdf.line(L_MARGIN, _box_bottom, L_MARGIN + USABLE_W, _box_bottom)      # bottom
+        pdf.setLineWidth(0.4)
+        pdf.setStrokeColorRGB(0, 0, 0)
+        y -= 18
 
     # ── Section 1: Executive Summary ─────────────────────────────────────────
 
@@ -1600,14 +1948,18 @@ def build_report_pdf(
         "high-humidity conditions and is noted in the data quality flags.",
         indent=12, font_size=9
     )
-    draw_wrapped(
-        "Timestamps: All timestamps are preserved exactly as recorded by the sensor — in UTC "
-        "(Coordinated Universal Time). No timezone conversion is applied automatically, because the "
-        "sensor's physical location is required to determine the correct local offset. To convert, "
-        "identify the sensor's time zone from its GPS coordinates and add the appropriate UTC offset. "
-        "All time-of-day patterns in this report therefore show UTC hours (0–23).",
-        indent=12, font_size=9
+    _tz_methods_note = (
+        f"Timestamps: All timestamps and time-of-day patterns in this report are displayed in "
+        f"{tz_label} (the timezone selected at analysis time). "
+        f"Original sensor recordings were in UTC; the conversion was applied before daily and "
+        f"hourly grouping so that all date boundaries and diurnal patterns reflect local calendar dates."
+        if (tz_label and tz_label != "UTC") else
+        "Timestamps: All timestamps are in UTC (Coordinated Universal Time) as recorded by the sensor. "
+        "No timezone conversion was applied. To convert to local time, add your UTC offset "
+        "(e.g., UTC−5 for US Eastern Standard, UTC+5:30 for India). "
+        "All time-of-day patterns in this report therefore show UTC hours (0–23)."
     )
+    draw_wrapped(_tz_methods_note, indent=12, font_size=9)
     y -= 4
     draw_line("Per-Record Quality Metrics:", indent=12, font_size=10, bold=True)
     y -= 2
@@ -1806,6 +2158,66 @@ def build_report_pdf(
         indent=24, font_size=9
     )
     y -= 8
+
+    # ── Section 5b: Highest Pollution Events ─────────────────────────────────
+
+    if highest_events:
+        if y < 220:
+            next_page()
+        draw_line("Top Pollution Events (ranked by peak PM2.5):", indent=12, font_size=10, bold=True)
+        y -= 4
+        # Event type explanations
+        draw_wrapped(
+            "Spike — a sudden, short-duration PM2.5 surge (minutes to ~2 hours) caused by a nearby source "
+            "such as vehicle traffic, cooking smoke, or open burning. "
+            "Sustained — a prolonged period (3+ hours) of elevated PM2.5 typically linked to regional "
+            "pollution transport, wildfire smoke, or persistent industrial emissions. "
+            "PM2.5 Range shows the Min – Max concentration recorded during the event window.",
+            indent=12, font_size=8.5, color=(0.35, 0.35, 0.35)
+        )
+        y -= 4
+
+        # Table header — 6 columns (Min column removed; Range shows min–max; Duration as HH:MM)
+        _evt_cols   = ["#", "Event Start", "Peak Time", "Peak µg/m³", "Range (Min–Max µg/m³)", "Duration (hh:mm)", "Type"]
+        _evt_widths = [18,  104,            104,          70,            130,                     52,         60]
+        _evt_x = [L_MARGIN + 8]
+        for w in _evt_widths[:-1]:
+            _evt_x.append(_evt_x[-1] + w)
+
+        pdf.setFont("Helvetica-Bold", 8)
+        pdf.setFillColorRGB(0.10, 0.22, 0.45)
+        for col_label, cx in zip(_evt_cols, _evt_x):
+            pdf.drawString(cx, y, col_label)
+        pdf.setFillColorRGB(0, 0, 0)
+        y -= 4
+        pdf.setLineWidth(0.5)
+        pdf.setStrokeColorRGB(0.10, 0.22, 0.45)
+        pdf.line(L_MARGIN, y, width - R_MARGIN, y)
+        pdf.setStrokeColorRGB(0, 0, 0)
+        y -= 10
+
+        for rank, ev in enumerate(highest_events[:10], 1):
+            if y < B_MARGIN + 18:
+                next_page()
+            row_vals = [
+                str(rank),
+                str(ev.get("Event Start", "—")),
+                str(ev.get("Peak Time", "—")),
+                str(ev.get("Peak PM2.5 (µg/m³)", "—")),
+                str(ev.get("PM2.5 Range (µg/m³)", "—")),
+                str(ev.get("Duration (hh:mm)", "—")),
+                str(ev.get("Type", "—")),
+            ]
+            pdf.setFont("Helvetica", 8)
+            for val, cx in zip(row_vals, _evt_x):
+                pdf.drawString(cx, y, val)
+            y -= 12
+
+        pdf.setLineWidth(0.3)
+        pdf.setStrokeColorRGB(0.75, 0.75, 0.75)
+        pdf.line(L_MARGIN, y, width - R_MARGIN, y)
+        pdf.setStrokeColorRGB(0, 0, 0)
+        y -= 12
 
     # ── Section 6: Regulatory Standards ──────────────────────────────────────
 
@@ -2107,37 +2519,20 @@ def build_report_pdf(
         ),
     }
 
+    # ── Separate figures: non-QC first, QC (Channel A vs B + Sensor Drift) last ─
     _QC_TITLES = {"Sensor drift", "Channel A vs B"}
-    _qc_header_printed = False
+    # Desired QC order: Channel A vs B, then Sensor Drift
+    _QC_ORDER  = ["Channel A vs B", "Sensor drift"]
+    non_qc_figs = [(t, p) for t, p in figures if t not in _QC_TITLES]
+    qc_figs_map  = {t: p for t, p in figures if t in _QC_TITLES}
+    qc_figs = [(t, qc_figs_map[t]) for t in _QC_ORDER if t in qc_figs_map]
 
-    for title, path in figures:
-        # QC section intro page (before first QC chart)
-        if title in _QC_TITLES and not _qc_header_printed:
-            next_page()
-            section_header("QC.", "Quality Control Section")
-            draw_wrapped(
-                "The two charts in this section are technical instrument-health diagnostics. "
-                "They are intended for researchers, data reviewers, and sensor owners carrying "
-                "out equipment maintenance. Non-technical readers can skip directly to the "
-                "air quality charts in the previous section.",
-                indent=12, font_size=9
-            )
-            draw_wrapped(
-                "Each PurpleAir sensor contains two completely independent laser particle counters "
-                "(Channel A and Channel B) running in parallel. The 'Sensor Drift' chart shows "
-                "whether their difference is growing over time (a sign of calibration decay). "
-                "The 'Channel A vs B' chart overlays both signals so you can see directly "
-                "how closely they track. Together they answer the question: can I trust this data?",
-                indent=12, font_size=9
-            )
-            _qc_header_printed = True
-
-        # Every figure gets its own dedicated page
+    def _render_figure_page(title, path):
+        nonlocal y
         next_page()
-
         explanation_tuple = figure_explanations.get(title)
 
-        # ── Figure page header ────────────────────────────────────────────
+        # Figure page header
         pdf.setFont("Helvetica-Bold", 14)
         pdf.setFillColorRGB(0.10, 0.22, 0.45)
         pdf.drawString(L_MARGIN, y, title)
@@ -2146,11 +2541,11 @@ def build_report_pdf(
         draw_rule(0.6)
         y -= 6
 
-        # ── Image ─────────────────────────────────────────────────────────
+        # Image
         image = ImageReader(str(path))
         if title == "PM2.5 Temporal Radar":
             img_w = min(int(USABLE_W * 0.78), 390)
-            img_h = img_w          # square polar chart
+            img_h = img_w
             x_pos = L_MARGIN + (USABLE_W - img_w) / 2
         else:
             img_w = USABLE_W
@@ -2160,16 +2555,58 @@ def build_report_pdf(
         pdf.drawImage(image, x_pos, y - img_h, width=img_w, height=img_h)
         y -= img_h + 16
 
-        # ── Plain-language description ─────────────────────────────────────
+        # Plain-language description
         if explanation_tuple:
-            labels = ["What this chart shows:", "How to read it:", "Why it matters for research:"]
-            for label, paragraph in zip(labels, explanation_tuple):
+            desc_labels = ["What this chart shows:", "How to read it:", "Why it matters for research:"]
+            for lbl, paragraph in zip(desc_labels, explanation_tuple):
                 if y < B_MARGIN + 20:
                     next_page()
-                draw_line(label, indent=0, font_size=9, bold=True, color=(0.10, 0.22, 0.45))
+                draw_line(lbl, indent=0, font_size=9, bold=True, color=(0.10, 0.22, 0.45))
                 draw_wrapped(paragraph, indent=12, font_size=9)
                 y -= 2
         y -= 8
+
+    # ── 1. Render all non-QC figures ──────────────────────────────────────────
+    for title, path in non_qc_figs:
+        _render_figure_page(title, path)
+
+    # ── 2. QC section intro page, then Channel A vs B, then Sensor Drift ──────
+    if qc_figs:
+        next_page()
+        section_header("QC.", "Quality Control Section")
+        draw_wrapped(
+            "The two charts in this section are technical instrument-health diagnostics. "
+            "They are intended for researchers, data reviewers, and sensor owners carrying "
+            "out equipment maintenance. Non-technical readers can skip directly to the "
+            "air quality charts in the previous section.",
+            indent=12, font_size=9
+        )
+        draw_wrapped(
+            "Each PurpleAir sensor contains two completely independent laser particle counters "
+            "(Channel A and Channel B) running in parallel. The 'Channel A vs B' chart overlays "
+            "both signals so you can see directly how closely they track each other. "
+            "The 'Sensor Drift' chart shows whether their difference is growing over time — "
+            "a warning sign of calibration decay. Together they answer: can I trust this data?",
+            indent=12, font_size=9
+        )
+        for title, path in qc_figs:
+            _render_figure_page(title, path)
+
+    # ── Custom Notes (user-authored sections appended after all standard content) ──
+    if custom_notes:
+        for _cn_idx, _note in enumerate(custom_notes):
+            _heading = (_note.get("heading") or "").strip()
+            _content = (_note.get("content") or "").strip()
+            if not _heading and not _content:
+                continue
+            next_page()
+            section_header(f"Note {_cn_idx + 1}.", _heading or "Additional Notes")
+            if _content:
+                for _para in _content.split("\n"):
+                    _para = _para.strip()
+                    if _para:
+                        draw_wrapped(_para, indent=12, font_size=9)
+                        y -= 2
 
     # ── Final footer on last page ─────────────────────────────────────────────
     _stamp_footer()
@@ -2768,6 +3205,27 @@ def analyze_dataset(
                 end = pd.Timestamp(end, tz='UTC')
             cleaned = cleaned.loc[start:end]
 
+    # ── Convert UTC index to user-specified local timezone ────────────────────
+    # This ensures daily/hourly grouping uses local calendar dates, not UTC dates.
+    _tz_label = "UTC"
+    _tz_obj = None   # keep a reference so we can also convert drift later
+    _tz_name = ((metadata or {}).get("timezone") or "UTC").strip()
+    if _tz_name and _tz_name != "UTC":
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            _tz_obj = _ZI(_tz_name)
+            cleaned.index = cleaned.index.tz_convert(_tz_obj)
+            _tz_label = _tz_name
+        except Exception as _tz_err:
+            try:
+                import pytz as _pytz_mod
+                _tz_obj = _pytz_mod.timezone(_tz_name)
+                cleaned.index = cleaned.index.tz_convert(_tz_obj)
+                _tz_label = _tz_name
+            except Exception:
+                _tz_label = "UTC"
+                _tz_obj = None
+
     hourly = cleaned.resample("h").mean(numeric_only=True)
     daily = cleaned.resample("d").mean(numeric_only=True)
     daily["aqi"] = calc_aqi_series(daily["pm25_corrected"].fillna(daily["pm25"]))["aqi"].values
@@ -2820,6 +3278,12 @@ def analyze_dataset(
         _pm25_max = float(_daily_pm.max()) if not _daily_pm.dropna().empty else 0.0
 
     drift_df = build_sensor_drift(df_work)
+    # Convert drift timestamps to local time (df_work still holds UTC timestamps)
+    if _tz_obj is not None and not drift_df.empty and "timestamp" in drift_df.columns:
+        try:
+            drift_df["timestamp"] = pd.DatetimeIndex(drift_df["timestamp"]).tz_convert(_tz_obj)
+        except Exception:
+            pass
 
     regression_info: Dict[str, Any] = {}
     regression_table: List[Dict[str, Any]] = []
@@ -2893,12 +3357,44 @@ def analyze_dataset(
     }
 
     events = detect_events(cleaned, "pm25")
+    _highest_events_rows: list = []
     if not events.empty:
         events = events.copy()
+        # Build top-10 highest events BEFORE serializing timestamps
+        _top = events.nlargest(10, "peak_pm25").copy()
+        _peak_ts_fmt = _top["peak_timestamp"].apply(
+            lambda v: v.strftime('%Y-%m-%d %H:%M') if pd.notna(v) else "—"
+        )
+        _start_fmt = _top["start"].apply(
+            lambda v: v.strftime('%Y-%m-%d %H:%M') if pd.notna(v) else "—"
+        )
+        def _fmt_dur(h):
+            try:
+                total_min = int(round(float(h) * 60))
+                return f"{total_min // 60:02d}:{total_min % 60:02d}"
+            except Exception:
+                return "—"
+        def _fmt_range(mn, mx):
+            try:
+                return f"{float(mn):.1f} – {float(mx):.1f}"
+            except Exception:
+                return "—"
+        _highest_events_rows = pd.DataFrame({
+            "Event Start": _start_fmt.values,
+            "Peak Time": _peak_ts_fmt.values,
+            "Peak PM2.5 (µg/m³)": _top["peak_pm25"].values,
+            "PM2.5 Range (µg/m³)": [_fmt_range(mn, mx) for mn, mx in zip(_top["min_pm25"].values, _top["peak_pm25"].values)],
+            "Duration (hh:mm)": [_fmt_dur(h) for h in _top["duration_hours"].values],
+            "Type": _top["type"].values,
+        }).to_dict(orient="records")
+        # Now serialize timestamps for the regular events table
         events["start"] = events["start"].apply(
             lambda value: value.isoformat() if pd.notna(value) else None
         )
         events["end"] = events["end"].apply(
+            lambda value: value.isoformat() if pd.notna(value) else None
+        )
+        events["peak_timestamp"] = events["peak_timestamp"].apply(
             lambda value: value.isoformat() if pd.notna(value) else None
         )
 
@@ -2963,14 +3459,14 @@ def analyze_dataset(
 
     # Build radar profile for multi-dimensional data quality visualization with coverage score
     radar_profile = build_radar_profile(cleaned, quality_score, channel_agreement, coverage_score)
-    pm25_temporal_radar = build_pm25_temporal_radar(cleaned, latitude=lat_value, longitude=lon_value)
+    pm25_temporal_radar = build_pm25_temporal_radar(cleaned, latitude=lat_value, longitude=lon_value, tz_label=_tz_label)
 
     channel_series = {"timestamps": [], "a": [], "b": [], "r2": channel_agreement.get("r2", None)}
     if "pm25_a" in df_work and "pm25_b" in df_work and "timestamp" in df_work:
         series_df = df_work[["timestamp", "pm25_a", "pm25_b"]].dropna(subset=["timestamp"])
         if not series_df.empty:
             channel_series = {
-                "timestamps": series_df["timestamp"].astype(str).tolist(),
+                "timestamps": _ts_str(series_df["timestamp"]),
                 "a": series_df["pm25_a"].round(2).fillna(None).tolist(),
                 "b": series_df["pm25_b"].round(2).fillna(None).tolist(),
                 "r2": channel_agreement.get("r2", None),
@@ -2980,7 +3476,7 @@ def analyze_dataset(
     _calendar_data = build_calendar_data(daily["aqi"] if "aqi" in daily.columns else pd.Series(dtype=float))
 
     # Correction comparison (decimate to ≤5000 pts for browser)
-    _corr_ts_raw = cleaned.index.astype(str).tolist()
+    _corr_ts_raw = _ts_str(cleaned.index)
     _corr_bk_raw  = cleaned["pm25_corrected"].round(2).fillna(None).tolist()
     _corr_lr_raw  = apply_lrapa_correction(cleaned["pm25"]).round(2).fillna(None).tolist()
     _corr_aq_raw  = apply_aqu_correction(cleaned["pm25"]).round(2).fillna(None).tolist()
@@ -3006,13 +3502,19 @@ def analyze_dataset(
     _pm_raw_avg  = round(float(cleaned["pm25"].mean()), 2) if not cleaned.empty else 0.0
     _aqi_avg     = int(cleaned["aqi"].mean()) if not cleaned.empty else 0
     _aqi_cat     = cleaned["aqi_category"].iloc[-1] if not cleaned.empty else "Unknown"
+    _aqi_current = int(cleaned["aqi"].iloc[-1]) if not cleaned.empty else 0
     _cv          = channel_agreement.get("cv_between_channels")
+    _n_days      = max(1, int((cleaned.index.max() - cleaned.index.min()).total_seconds() / 86400)) if not cleaned.empty else 0
     _narrative   = build_narrative_summary(
         _pm_corr_avg, _pm_raw_avg, _aqi_avg, _aqi_cat,
-        cleaned.index.min().isoformat() if not cleaned.empty else None,
-        cleaned.index.max().isoformat() if not cleaned.empty else None,
+        cleaned.index.min().strftime('%Y-%m-%dT%H:%M:%S') if not cleaned.empty else None,
+        cleaned.index.max().strftime('%Y-%m-%dT%H:%M:%S') if not cleaned.empty else None,
         int(len(df_work)), _n_events, _pm25_max, _cv,
         round(float(coverage_score), 1), round(float(quality_score), 1),
+        who_15_hours=int(exceedances.get("who_15", 0)),
+        epa_35_hours=int(exceedances.get("epa_35", 0)),
+        n_days=_n_days,
+        aqi_current=_aqi_current,
     )
 
     result = {
@@ -3039,14 +3541,15 @@ def analyze_dataset(
             "sensor_validation_status": channel_agreement.get("sensor_validation_status", None),
             "sensor_health_status": channel_agreement.get("sensor_health_status", None),
             "date_range": {
-                "start": cleaned.index.min().isoformat() if not cleaned.empty else None,
-                "end": cleaned.index.max().isoformat() if not cleaned.empty else None,
+                "start": cleaned.index.min().strftime('%Y-%m-%dT%H:%M:%S') if not cleaned.empty else None,
+                "end": cleaned.index.max().strftime('%Y-%m-%dT%H:%M:%S') if not cleaned.empty else None,
             },
             "total_readings": int(len(df_work)),
             "label": label or "Full period",
             "n_pollution_events": _n_events,
             "pm25_max": round(_pm25_max, 2),
             "narrative_summary": _narrative,
+            "tz_label": _tz_label,
         },
         "detected": {
             "pm25": _serialize_detected(pm_primary, pm_a, pm_b),
@@ -3063,9 +3566,9 @@ def analyze_dataset(
                 # Reindex with 2-minute frequency to inject NaN into missing periods
                 # This prevents false visual continuity across data gaps (e.g., 199.1h gap)
                 # IMPROVEMENT: Show full dataset with intelligent decimation for browser performance
-                "timestamps": decimate_data(cleaned.index.astype(str).tolist(), cleaned["pm25"].round(2).fillna(None).tolist())[0],
-                "pm25": decimate_data(cleaned.index.astype(str).tolist(), cleaned["pm25"].round(2).fillna(None).tolist())[1],
-                "pm25_corrected": decimate_data(cleaned.index.astype(str).tolist(), cleaned["pm25_corrected"].round(2).fillna(None).tolist())[1],
+                "timestamps": decimate_data(_ts_str(cleaned.index), cleaned["pm25"].round(2).fillna(None).tolist())[0],
+                "pm25": decimate_data(_ts_str(cleaned.index), cleaned["pm25"].round(2).fillna(None).tolist())[1],
+                "pm25_corrected": decimate_data(_ts_str(cleaned.index), cleaned["pm25_corrected"].round(2).fillna(None).tolist())[1],
                 "who_line": 15,
                 "epa_line": 35,
                 "gap_enforcement": "2T (2-minute refrequencing for physical gap visualization)",
@@ -3082,18 +3585,18 @@ def analyze_dataset(
             "channel_series": channel_series,
             "rolling_median": {
                 # IMPROVEMENT: Show full dataset with intelligent decimation for browser performance
-                "timestamps": decimate_data(rolling_df.get("timestamp", pd.Series(dtype=str)).astype(str).tolist(), rolling_df.get("pm25", pd.Series(dtype=float)).round(2).fillna(None).tolist())[0],
-                "pm25": decimate_data(rolling_df.get("timestamp", pd.Series(dtype=str)).astype(str).tolist(), rolling_df.get("pm25", pd.Series(dtype=float)).round(2).fillna(None).tolist())[1],
+                "timestamps": decimate_data(_ts_str(rolling_df.get("timestamp", pd.Series(dtype=object))), rolling_df.get("pm25", pd.Series(dtype=float)).round(2).fillna(None).tolist())[0],
+                "pm25": decimate_data(_ts_str(rolling_df.get("timestamp", pd.Series(dtype=object))), rolling_df.get("pm25", pd.Series(dtype=float)).round(2).fillna(None).tolist())[1],
                 "median_24h": rolling_df.get("median_24h", pd.Series(dtype=float)).round(2).fillna(None).tolist(),
                 "median_7d": rolling_df.get("median_7d", pd.Series(dtype=float)).round(2).fillna(None).tolist(),
                 # 1-hour rolling median at raw sub-hourly resolution (decimated to ≤2000 pts for browser)
                 "median_1h_timestamps": decimate_data(
-                    pm25_raw_for_1h.index.astype(str).tolist(),
+                    _ts_str(pm25_raw_for_1h.index),
                     rolling_1h_series.round(2).fillna(None).tolist(),
                     max_points=2000,
                 )[0],
                 "median_1h": decimate_data(
-                    pm25_raw_for_1h.index.astype(str).tolist(),
+                    _ts_str(pm25_raw_for_1h.index),
                     rolling_1h_series.round(2).fillna(None).tolist(),
                     max_points=2000,
                 )[1],
@@ -3106,8 +3609,8 @@ def analyze_dataset(
             },
             "sensor_drift": {
                 # IMPROVEMENT: Show full dataset with intelligent decimation for browser performance
-                "timestamps": decimate_data(drift_df.get("timestamp", pd.Series(dtype=str)).astype(str).tolist(), drift_df.get("diff", pd.Series(dtype=float)).round(2).fillna(None).tolist())[0],
-                "diff": decimate_data(drift_df.get("timestamp", pd.Series(dtype=str)).astype(str).tolist(), drift_df.get("diff", pd.Series(dtype=float)).round(2).fillna(None).tolist())[1],
+                "timestamps": decimate_data(_ts_str(drift_df.get("timestamp", pd.Series(dtype=object))), drift_df.get("diff", pd.Series(dtype=float)).round(2).fillna(None).tolist())[0],
+                "diff": decimate_data(_ts_str(drift_df.get("timestamp", pd.Series(dtype=object))), drift_df.get("diff", pd.Series(dtype=float)).round(2).fillna(None).tolist())[1],
                 "rolling": drift_df.get("rolling_7d", pd.Series(dtype=float)).round(2).fillna(None).tolist(),
             },
             "radar_pattern": radar_profile,
@@ -3126,6 +3629,7 @@ def analyze_dataset(
             "exceedances": exceedances,
             "events": events.fillna("").to_dict(orient="records"),
             "quality": quality_rows,
+            "highest_events": _highest_events_rows,
         },
         "anomalies": anomalies,
         "chart_descriptions": {
@@ -3172,6 +3676,14 @@ def analyze_dataset(
         },
     }
 
+    # Store parameters needed to regenerate the PDF with custom notes later
+    result["_pdf_params"] = {
+        "channel_agreement": channel_agreement,
+        "gap_analysis": gap_analysis if "gap_analysis" in dir() else {},
+        "tz_label": _tz_label,
+        "metadata": metadata or {},
+    }
+
     if not generate_outputs:
         return result, {}
 
@@ -3199,7 +3711,7 @@ def analyze_dataset(
         rolling_1h_values=rolling_1h_series,
     )
     report_pdf_path = output_dir / "report.pdf"
-    build_report_pdf(report_pdf_path, result["summary"], quality_rows, anomalies, report_figures, channel_agreement, gap_analysis, radar_profile, metadata=metadata)
+    build_report_pdf(report_pdf_path, result["summary"], quality_rows, anomalies, report_figures, channel_agreement, gap_analysis, radar_profile, metadata=metadata, tz_label=_tz_label, highest_events=_highest_events_rows)
     public_report_path = output_dir / "community_report.pdf"
     build_public_report_pdf(
         public_report_path,

@@ -30,6 +30,10 @@ const correctionSelect = document.getElementById('correction-select');
 let compareFiles = [];
 let compareFileIds = [];  // file_ids returned from server after comparison runs
 
+// State for custom notes and current analysis
+let customNotes = [];   // [{heading, content}, ...]
+let currentFileId = null;
+
 // Verify required DOM elements
 const requiredElements = {
   dropzone, fileInput, loading, dashboard,
@@ -53,6 +57,7 @@ const chartLayouts = {
     font: { family: 'Space Grotesk, sans-serif', color: '#333', size: 11 },
     margin: { t: 50, r: 80, b: 60, l: 70 },
     autosize: true,
+    height: 480,
     legend: {
       x: 1.02,
       y: 1,
@@ -157,6 +162,12 @@ function buildOverviewCards(summary) {
       note: `${summary.total_readings} readings`,
       color: '#1f1c16',
     },
+    {
+      title: 'Timezone',
+      value: summary.tz_label && summary.tz_label !== 'UTC' ? summary.tz_label.split('/').pop().replace('_', ' ') : 'UTC',
+      note: summary.tz_label || 'UTC — all timestamps in Coordinated Universal Time',
+      color: summary.tz_label && summary.tz_label !== 'UTC' ? '#1f7a8c' : '#6d6256',
+    },
   ];
 
   cards.forEach((card) => {
@@ -209,20 +220,46 @@ function buildTables(tables) {
   const statsContainer = document.getElementById('table-stats');
   const exceedContainer = document.getElementById('table-exceedances');
   const eventsContainer = document.getElementById('table-events');
+  const highestContainer = document.getElementById('table-highest-events');
 
   if (!statsContainer || !exceedContainer || !eventsContainer) {
     console.error('One or more table containers not found');
     return;
   }
 
-  statsContainer.innerHTML = buildTable(tables.stats);
+  statsContainer.innerHTML = `<div class="table-scroll">${buildTable(tables.stats)}</div>`;
   exceedContainer.innerHTML = `
     <table>
-      <tr><th>WHO 15 ug/m3 hours</th><td>${tables.exceedances.who_15}</td></tr>
-      <tr><th>EPA 35 ug/m3 hours</th><td>${tables.exceedances.epa_35}</td></tr>
+      <tr><th>WHO 15 µg/m³ hours</th><td>${tables.exceedances.who_15}</td></tr>
+      <tr><th>EPA 35 µg/m³ hours</th><td>${tables.exceedances.epa_35}</td></tr>
     </table>
   `;
-  eventsContainer.innerHTML = buildTable(tables.events);
+  const eventsHtml = buildTable(tables.events);
+  eventsContainer.innerHTML = eventsHtml.includes('<table>')
+    ? `<div class="event-type-legend compact">` +
+        `<span class="event-type-badge spike">Spike</span> sudden surge &nbsp;|&nbsp; ` +
+        `<span class="event-type-badge sustained">Sustained</span> 3+ hrs elevated` +
+      `</div><div class="table-scroll">${eventsHtml}</div>`
+    : eventsHtml;
+
+  if (highestContainer) {
+    if (tables.highest_events && tables.highest_events.length > 0) {
+      highestContainer.innerHTML =
+        `<div class="event-type-legend">` +
+          `<span class="event-type-badge spike">Spike</span>` +
+          `<span class="event-type-desc">Short, sharp PM2.5 surge (typically minutes–2 hrs) caused by a nearby source such as traffic, cooking, or burning.</span>` +
+          `<span class="event-type-badge sustained">Sustained</span>` +
+          `<span class="event-type-desc">Prolonged elevated PM2.5 lasting 3+ hrs, often indicating regional pollution, wildfires, or industrial activity.</span>` +
+        `</div>` +
+        `<p class="event-range-note">` +
+          `<strong>PM2.5 Range</strong> shows the Min – Max µg/m³ recorded during the event window, giving a sense of how far concentrations varied. ` +
+          `<strong>Duration (hh:mm)</strong> is shown as hours:minutes (e.g. 03:30 = 3 hours 30 minutes).` +
+        `</p>` +
+        `<div class="table-scroll">${buildTable(tables.highest_events)}</div>`;
+    } else {
+      highestContainer.innerHTML = '<p class="empty">No significant pollution events detected.</p>';
+    }
+  }
 }
 
 function buildTable(rows) {
@@ -252,14 +289,14 @@ function buildDownloads(fileId, outputs) {
   downloadResearch.innerHTML = '';
   downloadPublic.innerHTML = '';
   
-  // Research report (highest priority)
+  // Research report — POST with custom notes so they are embedded in the PDF
   if (outputs.research_report_pdf || outputs.report_pdf) {
-    const reportKey = outputs.research_report_pdf ? 'research_report_pdf' : 'report_pdf';
-    const btn = document.createElement('a');
-    btn.href = `/api/download/${fileId}/${reportKey}`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
     btn.className = 'btn primary';
     btn.textContent = 'Research Report PDF';
-    btn.title = 'Complete research-grade analysis report';
+    btn.title = 'Complete research-grade analysis report (includes your custom notes)';
+    btn.addEventListener('click', () => downloadReportWithNotes(fileId));
     downloadResearch.appendChild(btn);
   }
   
@@ -365,12 +402,7 @@ function buildChartDownloads() {
         const element = document.getElementById(chart.id);
         if (element && element.data && element.data.length > 0) {
           try {
-            const dataUrl = await Plotly.toImage(element, {
-              format: 'png',
-              width: 1920,
-              height: 1080,
-              scale: 2,
-            });
+            const dataUrl = await exportChartHD(element);
             const base64Data = dataUrl.split(',')[1];
             htmlContent += `
   <div class="page">
@@ -504,10 +536,10 @@ function renderCharts(charts) {
 
     console.log('Rendering charts with data:', Object.keys(charts));
 
-    // Chart container validation
+    // Chart container validation (chart-map excluded — removed as always-empty placeholder)
     const chartContainers = [
       'chart-timeseries', 'chart-aqi', 'chart-hourly', 'chart-heatmap',
-      'chart-map', 'chart-channel', 'chart-humidity', 'chart-aqi-dist', 'chart-quality'
+      'chart-channel', 'chart-humidity', 'chart-aqi-dist', 'chart-quality'
     ];
     const missingCharts = chartContainers.filter(id => !document.getElementById(id));
     if (missingCharts.length > 0) {
@@ -824,56 +856,9 @@ function renderCharts(charts) {
     }
     console.log('✓ Temporal radar rendered');
 
-    // Calendar heatmap
+    // Calendar — GitHub-style SVG with individual colored cells
     if (charts.calendar && charts.calendar.days && charts.calendar.days.length > 0) {
-      const calDays = charts.calendar.days;
-      const nWeeks = Math.max(...calDays.map(d => d.week_seq)) + 1;
-      const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
-      // Build z matrix [7 rows][nWeeks cols]
-      const z = Array.from({length: 7}, () => new Array(nWeeks).fill(null));
-      const textMat = Array.from({length: 7}, () => new Array(nWeeks).fill(''));
-      const weekLabel = new Array(nWeeks).fill('');
-
-      calDays.forEach(d => {
-        const w = d.week_seq, dw = d.weekday;
-        z[dw][w]       = d.aqi !== null ? d.aqi : null;
-        textMat[dw][w] = `${d.date}<br>AQI: ${d.aqi ?? 'N/A'}<br>${d.category}`;
-        if (weekLabel[w] === '') weekLabel[w] = d.date.slice(5); // first day seen in each week
-      });
-
-      Plotly.newPlot('chart-calendar', [{
-        type: 'heatmap',
-        z: z,
-        x: weekLabel,
-        y: dayNames,
-        text: textMat,
-        hovertemplate: '%{text}<extra></extra>',
-        colorscale: [
-          [0,   '#00C400'],
-          [0.1, '#FFFF00'],
-          [0.2, '#FF7E00'],
-          [0.3, '#FF0000'],
-          [0.6, '#8F3F97'],
-          [1.0, '#7E0023'],
-        ],
-        zmin: 0, zmax: 500,
-        showscale: true,
-        colorbar: {
-          tickvals: [25, 75, 125, 175, 250, 400],
-          ticktext: ['Good', 'Moderate', 'USG', 'Unhealthy', 'V.Unhealthy', 'Hazardous'],
-          thickness: 14, len: 0.8,
-        },
-        xgap: 2, ygap: 2,
-      }], {
-        title: { text: 'Daily AQI Calendar', font: { size: 14 } },
-        height: 230,
-        margin: { l: 50, r: 120, t: 45, b: 30 },
-        paper_bgcolor: '#fff',
-        xaxis: { nticks: 13, tickfont: { size: 10 } },
-        yaxis: { autorange: 'reversed', tickfont: { size: 10 } },
-        font: chartLayouts.base.font,
-      }, { ...chartConfig, displayModeBar: false });
+      renderAQICalendarSVG(charts.calendar.days);
     } else {
       const el = document.getElementById('chart-calendar');
       if (el) el.innerHTML = '<p class="empty" style="padding:2rem;text-align:center;color:#999;">Calendar requires at least 7 days of data.</p>';
@@ -895,16 +880,12 @@ function renderCharts(charts) {
       }, chartConfig);
     }
 
-    // Chart 9: Location map (placeholder)
-    console.log('Rendering map...');
-    document.getElementById('chart-map').innerHTML = '<p class="empty" style="padding: 2rem; text-align: center; color: #999;">Geographic data not available</p>';
-    console.log('✓ Map placeholder rendered');
   } catch (error) {
     console.error('Chart rendering failed:', error);
     console.error('Error stack:', error.stack);
     
     // Try to identify which chart failed
-    const chartIds = ['chart-timeseries', 'chart-aqi', 'chart-hourly', 'chart-heatmap', 'chart-channel', 'chart-humidity', 'chart-aqi-dist', 'chart-quality', 'chart-map'];
+    const chartIds = ['chart-timeseries', 'chart-aqi', 'chart-hourly', 'chart-heatmap', 'chart-channel', 'chart-humidity', 'chart-aqi-dist', 'chart-quality'];
     chartIds.forEach(id => {
       const el = document.getElementById(id);
       if (el && !el.innerHTML) {
@@ -922,7 +903,6 @@ function setupChartResize() {
     'chart-aqi',
     'chart-hourly',
     'chart-heatmap',
-    'chart-map',
     'chart-channel',
     'chart-humidity',
     'chart-aqi-dist',
@@ -1160,6 +1140,8 @@ async function handleSingleFile(file) {
   if (locationInput && locationInput.value.trim()) {
     formData.append('location', locationInput.value.trim());
   }
+  const tzSelect = document.getElementById('timezone-select');
+  formData.append('timezone', tzSelect ? tzSelect.value : 'UTC');
 
   try {
     const response = await fetch('/api/analyze', { method: 'POST', body: formData });
@@ -1170,6 +1152,8 @@ async function handleSingleFile(file) {
     }
     const payload = await response.json();
     const { result, outputs, file_id } = payload;
+    currentFileId = file_id;
+    initCustomNotes();  // resets customNotes=[] and clears the note cards list
 
     buildOverviewCards(result.summary);
     buildDetectedColumns(result.detected);
@@ -1265,49 +1249,90 @@ async function handleCompareRun() {
   }
 }
 
+async function exportChartHD(chartEl) {
+  // Temporarily widen margins so axis titles and legend are fully visible in the export.
+  // Polar charts (scatterpolar) use a different layout key; handle both cases.
+  const isPolar = chartEl.data && chartEl.data.some(t => t.type === 'scatterpolar' || t.type === 'indicator');
+  const origLayout = chartEl.layout || {};
+
+  // Build export-friendly layout patch
+  const exportPatch = isPolar
+    ? { margin: { l: 80, r: 80, t: 100, b: 100 } }
+    : {
+        margin: { l: 120, r: 260, t: 90, b: 110 },
+        legend: {
+          x: 1.02,
+          xanchor: 'left',
+          y: 1,
+          yanchor: 'top',
+          bgcolor: 'rgba(255,255,255,0.95)',
+          bordercolor: '#ccc',
+          borderwidth: 1,
+          font: { size: 13 },
+        },
+        xaxis: { ...((origLayout.xaxis) || {}), title: { ...(origLayout.xaxis?.title || {}), font: { size: 14 } } },
+        yaxis: { ...((origLayout.yaxis) || {}), title: { ...(origLayout.yaxis?.title || {}), font: { size: 14 } } },
+        font: { size: 14 },
+      };
+
+  await Plotly.relayout(chartEl, exportPatch);
+
+  const dataUrl = await Plotly.toImage(chartEl, {
+    format: 'png',
+    width: isPolar ? 1400 : 2600,
+    height: isPolar ? 1400 : 1300,
+    scale: 2,
+  });
+
+  // Restore original layout
+  const restorePatch = {
+    margin: origLayout.margin || { l: 70, r: 80, t: 50, b: 60 },
+    legend: origLayout.legend || chartLayouts.base.legend,
+    font: origLayout.font || chartLayouts.base.font,
+  };
+  if (!isPolar) {
+    restorePatch.xaxis = origLayout.xaxis || {};
+    restorePatch.yaxis = origLayout.yaxis || {};
+  }
+  await Plotly.relayout(chartEl, restorePatch);
+
+  return dataUrl;
+}
+
 function setupHDDownloads(fileId) {
   const hdButtons = document.querySelectorAll('.btn-icon.download-hd');
-  
+
   hdButtons.forEach(btn => {
     btn.addEventListener('click', async (e) => {
       e.preventDefault();
       const chartName = btn.dataset.chart;
       const chartElement = document.getElementById(`chart-${chartName}`);
-      
+
       if (!chartElement || !chartElement.data) {
-        alert(`Chart ${chartName} not ready for download`);
+        alert(`Chart "${chartName}" is not ready. Run an analysis first.`);
         return;
       }
-      
+
+      btn.disabled = true;
+      btn.style.opacity = '0.5';
+      const origText = btn.querySelector('span')?.textContent || '';
+      if (btn.querySelector('span')) btn.querySelector('span').textContent = '...';
+
       try {
-        // Disable button during download
-        btn.disabled = true;
-        btn.style.opacity = '0.5';
-        
-        // Export as HD PNG (2400x1600 @2x scale = publication quality)
-        const dataUrl = await Plotly.toImage(chartElement, {
-          format: 'png',
-          width: 2400,
-          height: 1600,
-          scale: 2
-        });
-        
-        // Create download link
+        const dataUrl = await exportChartHD(chartElement);
         const link = document.createElement('a');
         link.href = dataUrl;
         link.download = `${chartName}-hd-${new Date().toISOString().split('T')[0]}.png`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        
-        // Re-enable button
-        btn.disabled = false;
-        btn.style.opacity = '1';
       } catch (error) {
         console.error(`Failed to download HD ${chartName}:`, error);
-        alert(`Failed to download HD chart: ${error.message}`);
+        alert(`Failed to download chart: ${error.message}`);
+      } finally {
         btn.disabled = false;
         btn.style.opacity = '1';
+        if (btn.querySelector('span')) btn.querySelector('span').textContent = origText;
       }
     });
   });
@@ -1560,10 +1585,237 @@ function setupTimeframeSelector(fileId, summary) {
   });
 }
 
+// ─── AQI Calendar SVG ────────────────────────────────────────────────────────
+
+function _aqiColor(aqi) {
+  if (aqi === null || aqi === undefined) return '#e8e8e8';
+  if (aqi <= 50)  return '#00E400';
+  if (aqi <= 100) return '#FFFF00';
+  if (aqi <= 150) return '#FF7E00';
+  if (aqi <= 200) return '#FF0000';
+  if (aqi <= 300) return '#8F3F97';
+  return '#7E0023';
+}
+
+function _aqiCategory(aqi) {
+  if (aqi === null || aqi === undefined) return 'No data';
+  if (aqi <= 50)  return 'Good';
+  if (aqi <= 100) return 'Moderate';
+  if (aqi <= 150) return 'Unhealthy for Sensitive Groups';
+  if (aqi <= 200) return 'Unhealthy';
+  if (aqi <= 300) return 'Very Unhealthy';
+  return 'Hazardous';
+}
+
+function renderAQICalendarSVG(days) {
+  const container = document.getElementById('chart-calendar');
+  if (!container) return;
+
+  const CELL = 20, GAP = 4, STEP = CELL + GAP;
+  const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const LEFT_PAD = 42, TOP_PAD = 42, BOTTOM_PAD = 52;
+
+  // Sort days and build week columns (Monday-aligned)
+  const sorted = [...days].sort((a, b) => a.date < b.date ? -1 : 1);
+  const nWeeks = sorted.length > 0 ? (Math.max(...sorted.map(d => d.week_seq)) + 1) : 0;
+  if (nWeeks === 0) {
+    container.innerHTML = '<p class="empty" style="padding:2rem;text-align:center;color:#999;">No calendar data available.</p>';
+    return;
+  }
+
+  const svgW = Math.max(LEFT_PAD + nWeeks * STEP + 24, 300);
+  const svgH = TOP_PAD + 7 * STEP + BOTTOM_PAD;
+
+  // Find the most recent day with data
+  const latestDay = sorted.filter(d => d.aqi !== null && d.aqi !== undefined).slice(-1)[0];
+
+  // Month label positions — only at month transitions, with minimum spacing of 28px
+  const monthLabels = [];
+  let lastMonth = null, lastLabelX = -999;
+  sorted.forEach(d => {
+    const mo = d.date.slice(0, 7);
+    if (mo !== lastMonth) {
+      const x = LEFT_PAD + d.week_seq * STEP;
+      const monthIdx = parseInt(d.date.slice(5, 7), 10) - 1;
+      const label = MONTH_NAMES[monthIdx] + ' \'' + d.date.slice(2, 4);
+      if (x - lastLabelX >= 30) {
+        monthLabels.push({ x, label });
+        lastLabelX = x;
+      }
+      lastMonth = mo;
+    }
+  });
+
+  // Build SVG (scrollable wrapper applied via CSS)
+  let svgParts = [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" ` +
+    `style="font-family:Space Grotesk,sans-serif;display:block;">`
+  ];
+
+  // Day-of-week labels
+  DAY_LABELS.forEach((label, i) => {
+    svgParts.push(
+      `<text x="${LEFT_PAD - 6}" y="${TOP_PAD + i * STEP + CELL - 5}" ` +
+      `text-anchor="end" font-size="11" fill="#666">${label}</text>`
+    );
+  });
+
+  // Month labels (top, no overlap)
+  monthLabels.forEach(({ x, label }) => {
+    svgParts.push(`<text x="${x + 2}" y="${TOP_PAD - 10}" font-size="11" font-weight="600" fill="#444">${label}</text>`);
+  });
+
+  // Cells
+  sorted.forEach(d => {
+    const cx = LEFT_PAD + d.week_seq * STEP;
+    const cy = TOP_PAD + d.weekday * STEP;
+    const color = _aqiColor(d.aqi);
+    const isLatest = latestDay && d.date === latestDay.date;
+    const stroke = isLatest ? '#1f1c16' : '#e0dbd0';
+    const sw = isLatest ? 2 : 0.5;
+    svgParts.push(
+      `<rect class="aqi-cal-cell" x="${cx}" y="${cy}" width="${CELL}" height="${CELL}" rx="3" ry="3" ` +
+      `fill="${color}" stroke="${stroke}" stroke-width="${sw}" ` +
+      `data-date="${d.date}" data-aqi="${d.aqi ?? ''}" data-cat="${_aqiCategory(d.aqi)}" />`
+    );
+  });
+
+  // Legend row
+  const legendItems = [
+    { label: 'Good', color: '#00E400' },
+    { label: 'Moderate', color: '#FFFF00' },
+    { label: 'USG', color: '#FF7E00' },
+    { label: 'Unhealthy', color: '#FF0000' },
+    { label: 'V. Unhealthy', color: '#8F3F97' },
+    { label: 'Hazardous', color: '#7E0023' },
+    { label: 'No data', color: '#e8e8e8' },
+  ];
+  const legendY = TOP_PAD + 7 * STEP + 18;
+  let lx = LEFT_PAD;
+  legendItems.forEach(({ label, color }) => {
+    svgParts.push(`<rect x="${lx}" y="${legendY}" width="13" height="13" rx="2" fill="${color}" stroke="#ccc" stroke-width="0.7"/>`);
+    svgParts.push(`<text x="${lx + 17}" y="${legendY + 10}" font-size="10.5" fill="#555">${label}</text>`);
+    lx += label.length * 6.2 + 26;
+  });
+
+  svgParts.push('</svg>');
+
+  // Wrap SVG + subtitle
+  const dataNote = latestDay
+    ? `Daily average AQI from uploaded file data (not real-time) — latest: <strong>${latestDay.date}</strong>, AQI <strong>${latestDay.aqi ?? 'N/A'}</strong> (${_aqiCategory(latestDay.aqi)})`
+    : 'Daily average AQI from uploaded file data (not real-time)';
+
+  container.innerHTML =
+    `<div class="aqi-cal-scroll">${svgParts.join('')}</div>` +
+    `<p class="aqi-cal-note">${dataNote}</p>`;
+
+  // Floating tooltip
+  let tip = document.getElementById('aqi-cal-tip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = 'aqi-cal-tip';
+    tip.className = 'aqi-cal-tip';
+    document.body.appendChild(tip);
+  }
+
+  container.querySelectorAll('.aqi-cal-cell').forEach(cell => {
+    cell.addEventListener('mouseenter', () => {
+      const aqi = cell.dataset.aqi !== '' ? Number(cell.dataset.aqi) : null;
+      tip.innerHTML = `<strong>${cell.dataset.date}</strong><br>AQI: ${aqi ?? 'N/A'} — ${cell.dataset.cat}`;
+      tip.style.display = 'block';
+    });
+    cell.addEventListener('mousemove', (e) => {
+      tip.style.left = (e.pageX + 14) + 'px';
+      tip.style.top  = (e.pageY - 40) + 'px';
+    });
+    cell.addEventListener('mouseleave', () => {
+      tip.style.display = 'none';
+    });
+  });
+}
+
+// ─── Custom Notes ─────────────────────────────────────────────────────────────
+
+function initCustomNotes() {
+  customNotes = [];
+  const list = document.getElementById('custom-notes-list');
+  if (list) list.innerHTML = '';
+}
+
+function addNoteCard() {
+  const list = document.getElementById('custom-notes-list');
+  if (!list) return;
+  const idx = customNotes.length;
+  customNotes.push({ heading: '', content: '' });
+
+  const card = document.createElement('div');
+  card.className = 'note-card';
+  card.dataset.idx = idx;
+  card.innerHTML = `
+    <div class="note-card-header">
+      <span class="note-card-num">Note ${idx + 1}</span>
+      <button type="button" class="note-remove-btn" title="Remove this note">✕</button>
+    </div>
+    <input type="text" class="note-heading-input" placeholder="Section heading (e.g. Site Observations)" maxlength="120" value="" />
+    <textarea class="note-content-input" placeholder="Enter your notes, observations, or commentary here. Use new lines for paragraphs." rows="4"></textarea>
+  `;
+
+  card.querySelector('.note-heading-input').addEventListener('input', e => {
+    customNotes[idx].heading = e.target.value;
+  });
+  card.querySelector('.note-content-input').addEventListener('input', e => {
+    customNotes[idx].content = e.target.value;
+  });
+  card.querySelector('.note-remove-btn').addEventListener('click', () => {
+    customNotes[idx] = null;
+    card.remove();
+  });
+
+  list.appendChild(card);
+}
+
+// ─── Download report with notes via POST ─────────────────────────────────────
+
+async function downloadReportWithNotes(fileId) {
+  const notes = customNotes.filter(n => n !== null && (n.heading.trim() || n.content.trim()));
+  try {
+    const resp = await fetch(`/api/generate-report/${fileId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ custom_notes: notes }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert('Report generation failed: ' + (err.detail || resp.statusText));
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'report_analysis.pdf';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+  } catch (e) {
+    alert('Download error: ' + e.message);
+  }
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+
 setupDropzone();
 setupCompareControls();
 setupChartResize();
 _updateCompareUI();
+
+// Bind the add-note button once on page load — not inside handleSingleFile
+// so it's always functional regardless of upload flow.
+(function bindAddNoteBtn() {
+  const btn = document.getElementById('add-note-btn');
+  if (btn) btn.addEventListener('click', addNoteCard);
+})();
 
 if (compareDownloadReportBtn) {
   compareDownloadReportBtn.addEventListener('click', downloadComparisonReport);

@@ -1124,3 +1124,181 @@ tr:hover {
   .footer-divider { display: none; }
   .footer-person { padding: 0; }
 }
+
+/* ── Custom Notes ───────────────────────────────────────────────────────────── */
+.custom-notes-section { margin-bottom: 32px; }
+
+.note-card {
+  background: var(--card);
+  border: 1px solid #e0d6c8;
+  border-radius: 10px;
+  padding: 14px 16px 12px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 4px var(--shadow);
+}
+
+.note-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.note-card-num {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.note-heading-input {
+  width: 100%;
+  border: 1px solid #d5ccbf;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  background: #fff;
+  color: var(--ink);
+  margin-bottom: 8px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.note-heading-input:focus { border-color: var(--accent); }
+
+.note-content-input {
+  width: 100%;
+  border: 1px solid #d5ccbf;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 0.88rem;
+  background: #fff;
+  color: var(--ink);
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.15s;
+  line-height: 1.5;
+}
+.note-content-input:focus { border-color: var(--accent); }
+
+.note-remove-btn {
+  background: none;
+  border: none;
+  color: #b0a090;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.note-remove-btn:hover { color: var(--rose); background: #fde8e8; }
+
+/* ── AQI Calendar SVG tooltip ────────────────────────────────────────────────── */
+.aqi-cal-tip {
+  position: fixed;
+  display: none;
+  background: rgba(30, 28, 22, 0.9);
+  color: #fff;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  padding: 7px 11px;
+  border-radius: 7px;
+  pointer-events: none;
+  z-index: 9999;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.aqi-cal-cell { cursor: crosshair; transition: opacity 0.1s; }
+.aqi-cal-cell:hover { opacity: 0.78; }
+
+/* AQI Calendar scroll + note */
+.aqi-cal-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+}
+.aqi-cal-note {
+  margin: 8px 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* ── Scrollable statistics tables ──────────────────────────────────────────── */
+.table-scroll {
+  max-height: 340px;
+  overflow-y: auto;
+  border-radius: 6px;
+  border: 1px solid rgba(31, 28, 22, 0.08);
+}
+
+.table-scroll table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.table-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: #f5f2ec;
+  z-index: 1;
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 0.8rem;
+  color: var(--ink);
+  border-bottom: 2px solid var(--accent);
+  white-space: nowrap;
+}
+
+.table-scroll tbody td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(31, 28, 22, 0.06);
+  vertical-align: top;
+}
+
+.table-scroll tbody tr:last-child td { border-bottom: none; }
+.table-scroll tbody tr:hover { background: #fafaf8; }
+
+/* ── Pollution event type legend ────────────────────────────────────────────── */
+.event-type-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  margin-bottom: 8px;
+  font-size: 0.83rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.event-type-legend.compact { margin-bottom: 6px; font-size: 0.8rem; }
+.event-type-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.event-type-badge.spike {
+  background: #fff0e0;
+  color: #b85c00;
+  border: 1px solid #f6aa1c;
+}
+.event-type-badge.sustained {
+  background: #fde8e8;
+  color: #a01010;
+  border: 1px solid #f25c54;
+}
+.event-type-desc { flex: 1; min-width: 160px; }
+.event-range-note {
+  font-size: 0.81rem;
+  color: var(--muted);
+  margin: 0 0 10px;
+  line-height: 1.5;
+}
