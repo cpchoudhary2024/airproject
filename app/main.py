@@ -132,7 +132,11 @@ async def _run_analysis_job(file: UploadFile, *, generate_outputs: bool = True, 
     with raw_path.open("wb") as f:
         f.write(await file.read())
 
-    result, outputs = analyze_dataset(raw_path, job_dir, generate_outputs=generate_outputs, metadata=metadata)
+    try:
+        result, outputs = analyze_dataset(raw_path, job_dir, generate_outputs=generate_outputs, metadata=metadata)
+    except Exception as exc:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}\n{traceback.format_exc()}")
 
     # Store summary payload with outputs for reuse or debugging.
     summary_data = result.copy()

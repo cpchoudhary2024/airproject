@@ -24,8 +24,10 @@ COPY app/ ./app/
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# /tmp is always world-writable so the app can create its data dir at runtime
-ENV DATA_DIR=/tmp/airproject
+# /tmp is always world-writable so the app can create its data dirs at runtime
+ENV DATA_DIR=/tmp/airproject \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    MPLBACKEND=Agg
 
 # HF Spaces requires exactly port 7860
 EXPOSE 7860

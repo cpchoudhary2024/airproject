@@ -1147,7 +1147,12 @@ async function handleSingleFile(file) {
     const response = await fetch('/api/analyze', { method: 'POST', body: formData });
     if (!response.ok) {
       showLoading(false);
-      alert('Upload failed. Please check your file and try again.');
+      let errMsg = 'Upload failed. Please check your file and try again.';
+      try {
+        const errData = await response.json();
+        if (errData.detail) errMsg = 'Error: ' + errData.detail;
+      } catch (_) {}
+      alert(errMsg);
       return;
     }
     const payload = await response.json();
