@@ -1,6 +1,6 @@
-__pycache__/
-*.pyc
-*.pyo
+**/__pycache__/
+**/*.pyc
+**/*.pyo
 .venv/
 venv/
 .env
@@ -13,3 +13,6 @@ test_output*/
 .DS_Store
 .vercel/
 api/
+.git/
+*.md
+!README.md
