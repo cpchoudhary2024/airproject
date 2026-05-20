@@ -3467,8 +3467,8 @@ def analyze_dataset(
         if not series_df.empty:
             channel_series = {
                 "timestamps": _ts_str(series_df["timestamp"]),
-                "a": series_df["pm25_a"].round(2).fillna(None).tolist(),
-                "b": series_df["pm25_b"].round(2).fillna(None).tolist(),
+                "a": series_df["pm25_a"].round(2).where(lambda s: s.notna(), None).tolist(),
+                "b": series_df["pm25_b"].round(2).where(lambda s: s.notna(), None).tolist(),
                 "r2": channel_agreement.get("r2", None),
             }
 
@@ -3477,9 +3477,9 @@ def analyze_dataset(
 
     # Correction comparison (decimate to ≤5000 pts for browser)
     _corr_ts_raw = _ts_str(cleaned.index)
-    _corr_bk_raw  = cleaned["pm25_corrected"].round(2).fillna(None).tolist()
-    _corr_lr_raw  = apply_lrapa_correction(cleaned["pm25"]).round(2).fillna(None).tolist()
-    _corr_aq_raw  = apply_aqu_correction(cleaned["pm25"]).round(2).fillna(None).tolist()
+    _corr_bk_raw  = cleaned["pm25_corrected"].round(2).where(lambda s: s.notna(), None).tolist()
+    _corr_lr_raw  = apply_lrapa_correction(cleaned["pm25"]).round(2).where(lambda s: s.notna(), None).tolist()
+    _corr_aq_raw  = apply_aqu_correction(cleaned["pm25"]).round(2).where(lambda s: s.notna(), None).tolist()
     _corr_ts_d, _corr_bk_d = decimate_data(_corr_ts_raw, _corr_bk_raw)
     _,           _corr_lr_d = decimate_data(_corr_ts_raw, _corr_lr_raw)
     _,           _corr_aq_d = decimate_data(_corr_ts_raw, _corr_aq_raw)
@@ -3566,9 +3566,9 @@ def analyze_dataset(
                 # Reindex with 2-minute frequency to inject NaN into missing periods
                 # This prevents false visual continuity across data gaps (e.g., 199.1h gap)
                 # IMPROVEMENT: Show full dataset with intelligent decimation for browser performance
-                "timestamps": decimate_data(_ts_str(cleaned.index), cleaned["pm25"].round(2).fillna(None).tolist())[0],
-                "pm25": decimate_data(_ts_str(cleaned.index), cleaned["pm25"].round(2).fillna(None).tolist())[1],
-                "pm25_corrected": decimate_data(_ts_str(cleaned.index), cleaned["pm25_corrected"].round(2).fillna(None).tolist())[1],
+                "timestamps": decimate_data(_ts_str(cleaned.index), cleaned["pm25"].round(2).where(lambda s: s.notna(), None).tolist())[0],
+                "pm25": decimate_data(_ts_str(cleaned.index), cleaned["pm25"].round(2).where(lambda s: s.notna(), None).tolist())[1],
+                "pm25_corrected": decimate_data(_ts_str(cleaned.index), cleaned["pm25_corrected"].round(2).where(lambda s: s.notna(), None).tolist())[1],
                 "who_line": 15,
                 "epa_line": 35,
                 "gap_enforcement": "2T (2-minute refrequencing for physical gap visualization)",
@@ -3585,33 +3585,33 @@ def analyze_dataset(
             "channel_series": channel_series,
             "rolling_median": {
                 # IMPROVEMENT: Show full dataset with intelligent decimation for browser performance
-                "timestamps": decimate_data(_ts_str(rolling_df.get("timestamp", pd.Series(dtype=object))), rolling_df.get("pm25", pd.Series(dtype=float)).round(2).fillna(None).tolist())[0],
-                "pm25": decimate_data(_ts_str(rolling_df.get("timestamp", pd.Series(dtype=object))), rolling_df.get("pm25", pd.Series(dtype=float)).round(2).fillna(None).tolist())[1],
-                "median_24h": rolling_df.get("median_24h", pd.Series(dtype=float)).round(2).fillna(None).tolist(),
-                "median_7d": rolling_df.get("median_7d", pd.Series(dtype=float)).round(2).fillna(None).tolist(),
+                "timestamps": decimate_data(_ts_str(rolling_df.get("timestamp", pd.Series(dtype=object))), rolling_df.get("pm25", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist())[0],
+                "pm25": decimate_data(_ts_str(rolling_df.get("timestamp", pd.Series(dtype=object))), rolling_df.get("pm25", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist())[1],
+                "median_24h": rolling_df.get("median_24h", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist(),
+                "median_7d": rolling_df.get("median_7d", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist(),
                 # 1-hour rolling median at raw sub-hourly resolution (decimated to ≤2000 pts for browser)
                 "median_1h_timestamps": decimate_data(
                     _ts_str(pm25_raw_for_1h.index),
-                    rolling_1h_series.round(2).fillna(None).tolist(),
+                    rolling_1h_series.round(2).where(lambda s: s.notna(), None).tolist(),
                     max_points=2000,
                 )[0],
                 "median_1h": decimate_data(
                     _ts_str(pm25_raw_for_1h.index),
-                    rolling_1h_series.round(2).fillna(None).tolist(),
+                    rolling_1h_series.round(2).where(lambda s: s.notna(), None).tolist(),
                     max_points=2000,
                 )[1],
             },
             "diurnal_pattern": {
                 "hours": diurnal_df.get("hour", pd.Series(dtype=int)).tolist(),
-                "mean": diurnal_df.get("mean", pd.Series(dtype=float)).round(2).fillna(None).tolist(),
-                "p10": diurnal_df.get("p10", pd.Series(dtype=float)).round(2).fillna(None).tolist(),
-                "p90": diurnal_df.get("p90", pd.Series(dtype=float)).round(2).fillna(None).tolist(),
+                "mean": diurnal_df.get("mean", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist(),
+                "p10": diurnal_df.get("p10", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist(),
+                "p90": diurnal_df.get("p90", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist(),
             },
             "sensor_drift": {
                 # IMPROVEMENT: Show full dataset with intelligent decimation for browser performance
-                "timestamps": decimate_data(_ts_str(drift_df.get("timestamp", pd.Series(dtype=object))), drift_df.get("diff", pd.Series(dtype=float)).round(2).fillna(None).tolist())[0],
-                "diff": decimate_data(_ts_str(drift_df.get("timestamp", pd.Series(dtype=object))), drift_df.get("diff", pd.Series(dtype=float)).round(2).fillna(None).tolist())[1],
-                "rolling": drift_df.get("rolling_7d", pd.Series(dtype=float)).round(2).fillna(None).tolist(),
+                "timestamps": decimate_data(_ts_str(drift_df.get("timestamp", pd.Series(dtype=object))), drift_df.get("diff", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist())[0],
+                "diff": decimate_data(_ts_str(drift_df.get("timestamp", pd.Series(dtype=object))), drift_df.get("diff", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist())[1],
+                "rolling": drift_df.get("rolling_7d", pd.Series(dtype=float)).round(2).where(lambda s: s.notna(), None).tolist(),
             },
             "radar_pattern": radar_profile,
             "pm25_temporal_radar": pm25_temporal_radar,
