@@ -457,6 +457,14 @@ def detect_events(df: pd.DataFrame, pm_col: str) -> pd.DataFrame:
 
     elevated = series > 35
 
+    def _event_segment(s, t_start, t_end):
+        """Return the slice [t_start, t_end) — exclusive of the end timestamp.
+        pandas label-based slicing is inclusive on both ends, so we use
+        positional searchsorted to get a proper half-open interval."""
+        lo = s.index.searchsorted(t_start)
+        hi = s.index.searchsorted(t_end)   # exclusive
+        return s.iloc[lo:hi] if hi > lo else s.iloc[lo:lo+1]
+
     events = []
     for label, mask in [("Spike", spikes), ("Sustained", elevated)]:
         start = None
@@ -469,7 +477,7 @@ def detect_events(df: pd.DataFrame, pm_col: str) -> pd.DataFrame:
                 if label == "Sustained" and duration < 3:
                     start = None
                     continue
-                segment = series[start:end]
+                segment = _event_segment(series, start, end)
                 if not segment.empty:
                     peak_idx = segment.idxmax()
                     peak_val = round(float(segment.max()), 2)
@@ -489,7 +497,7 @@ def detect_events(df: pd.DataFrame, pm_col: str) -> pd.DataFrame:
             end = mask.index[-1]
             duration = (end - start).total_seconds() / 3600.0
             if label == "Sustained" and duration >= 3:
-                segment = series[start:end]
+                segment = _event_segment(series, start, end)
                 if not segment.empty:
                     peak_idx = segment.idxmax()
                     peak_val = round(float(segment.max()), 2)
@@ -3377,7 +3385,10 @@ def analyze_dataset(
                 return "—"
         def _fmt_range(mn, mx):
             try:
-                return f"{float(mn):.1f} – {float(mx):.1f}"
+                mn_f, mx_f = float(mn), float(mx)
+                if math.isnan(mn_f) or math.isnan(mx_f):
+                    return "—"
+                return f"{mn_f:.1f} – {mx_f:.1f}"
             except Exception:
                 return "—"
         _highest_events_rows = pd.DataFrame({
