@@ -332,9 +332,9 @@ h2 {
   background: #ffffff;
   border-radius: 14px;
   padding: 8px;
-  min-height: 320px;
-  height: 360px;
-  overflow: hidden;
+  min-height: 480px;
+  height: auto;
+  overflow: visible;
   position: relative;
 }
 

@@ -3357,6 +3357,7 @@ def analyze_dataset(
     }
 
     events = detect_events(cleaned, "pm25")
+    events_display = pd.DataFrame()
     _highest_events_rows: list = []
     if not events.empty:
         events = events.copy()
@@ -3387,7 +3388,25 @@ def analyze_dataset(
             "Duration (hh:mm)": [_fmt_dur(h) for h in _top["duration_hours"].values],
             "Type": _top["type"].values,
         }).to_dict(orient="records")
-        # Now serialize timestamps for the regular events table
+        # Build the display-ready events table (all events, not just top 10)
+        def _fmt_ts(v):
+            try:
+                return pd.Timestamp(v).strftime('%Y-%m-%d %H:%M') if pd.notna(v) else "—"
+            except Exception:
+                return "—"
+        events_display = pd.DataFrame({
+            "Event Start":          events["start"].apply(_fmt_ts),
+            "Event End":            events["end"].apply(_fmt_ts),
+            "Peak Time":            events["peak_timestamp"].apply(_fmt_ts),
+            "Peak PM2.5 (µg/m³)":  events["peak_pm25"].round(2),
+            "PM2.5 Range (µg/m³)": [
+                _fmt_range(mn, mx)
+                for mn, mx in zip(events["min_pm25"].values, events["peak_pm25"].values)
+            ],
+            "Duration (hh:mm)":    [_fmt_dur(h) for h in events["duration_hours"].values],
+            "Type":                 events["type"],
+        })
+        # Still serialize raw timestamps for other uses (CSV download etc.)
         events["start"] = events["start"].apply(
             lambda value: value.isoformat() if pd.notna(value) else None
         )
@@ -3627,7 +3646,7 @@ def analyze_dataset(
         "tables": {
             "stats": stats.fillna("").to_dict(orient="records"),
             "exceedances": exceedances,
-            "events": events.fillna("").to_dict(orient="records"),
+            "events": events_display.fillna("").to_dict(orient="records") if not events.empty else [],
             "quality": quality_rows,
             "highest_events": _highest_events_rows,
         },

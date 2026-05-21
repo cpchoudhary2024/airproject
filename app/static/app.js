@@ -880,6 +880,16 @@ function renderCharts(charts) {
       }, chartConfig);
     }
 
+    // Force Plotly to fill containers correctly after all charts are rendered
+    setTimeout(() => {
+      ['chart-timeseries','chart-aqi','chart-hourly','chart-heatmap',
+       'chart-channel','chart-humidity','chart-aqi-dist','chart-quality',
+       'chart-correction','chart-drift'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && el.data) Plotly.Plots.resize(el);
+      });
+    }, 100);
+
   } catch (error) {
     console.error('Chart rendering failed:', error);
     console.error('Error stack:', error.stack);
@@ -1255,28 +1265,29 @@ async function handleCompareRun() {
 }
 
 async function exportChartHD(chartEl) {
-  // Temporarily widen margins so axis titles and legend are fully visible in the export.
-  // Polar charts (scatterpolar) use a different layout key; handle both cases.
   const isPolar = chartEl.data && chartEl.data.some(t => t.type === 'scatterpolar' || t.type === 'indicator');
-  const origLayout = chartEl.layout || {};
+  // Deep-clone the current layout so restore is always accurate
+  const origLayout = JSON.parse(JSON.stringify(chartEl.layout || {}));
 
-  // Build export-friendly layout patch
+  // Axis titles can be stored as plain strings OR as {text, font} objects by Plotly internally
+  const resolveTitle = (t) => {
+    if (!t) return {};
+    if (typeof t === 'string') return { text: t, font: { size: 15 } };
+    return { ...t, font: { size: 15 } };
+  };
+
   const exportPatch = isPolar
-    ? { margin: { l: 80, r: 80, t: 100, b: 100 } }
+    ? { margin: { l: 90, r: 90, t: 110, b: 110 } }
     : {
-        margin: { l: 120, r: 260, t: 90, b: 110 },
+        margin: { l: 130, r: 270, t: 90, b: 120 },
         legend: {
-          x: 1.02,
-          xanchor: 'left',
-          y: 1,
-          yanchor: 'top',
-          bgcolor: 'rgba(255,255,255,0.95)',
-          bordercolor: '#ccc',
-          borderwidth: 1,
+          x: 1.02, xanchor: 'left', y: 1, yanchor: 'top',
+          bgcolor: 'rgba(255,255,255,0.97)',
+          bordercolor: '#bbb', borderwidth: 1,
           font: { size: 13 },
         },
-        xaxis: { ...((origLayout.xaxis) || {}), title: { ...(origLayout.xaxis?.title || {}), font: { size: 14 } } },
-        yaxis: { ...((origLayout.yaxis) || {}), title: { ...(origLayout.yaxis?.title || {}), font: { size: 14 } } },
+        xaxis: { ...(origLayout.xaxis || {}), title: resolveTitle(origLayout.xaxis?.title) },
+        yaxis: { ...(origLayout.yaxis || {}), title: resolveTitle(origLayout.yaxis?.title) },
         font: { size: 14 },
       };
 
@@ -1284,22 +1295,13 @@ async function exportChartHD(chartEl) {
 
   const dataUrl = await Plotly.toImage(chartEl, {
     format: 'png',
-    width: isPolar ? 1400 : 2600,
-    height: isPolar ? 1400 : 1300,
+    width:  isPolar ? 1400 : 2800,
+    height: isPolar ? 1400 : 1400,
     scale: 2,
   });
 
-  // Restore original layout
-  const restorePatch = {
-    margin: origLayout.margin || { l: 70, r: 80, t: 50, b: 60 },
-    legend: origLayout.legend || chartLayouts.base.legend,
-    font: origLayout.font || chartLayouts.base.font,
-  };
-  if (!isPolar) {
-    restorePatch.xaxis = origLayout.xaxis || {};
-    restorePatch.yaxis = origLayout.yaxis || {};
-  }
-  await Plotly.relayout(chartEl, restorePatch);
+  // Restore exactly the original layout
+  await Plotly.relayout(chartEl, origLayout);
 
   return dataUrl;
 }
