@@ -1526,16 +1526,23 @@ def build_report_figures(
     # ── 5. QUALITY CONTROL SECTION: Sensor Drift ──
     if not drift_df.empty:
         fig, ax = plt.subplots(figsize=(8.0, 3.6))
-        ax.plot(drift_df["timestamp"], drift_df["diff"], color="#1f7a8c", alpha=0.4, label="Channel A – B")
-        ax.plot(drift_df["timestamp"], drift_df["rolling_7d"], color="#f25c54", label="7d median drift", linewidth=2)
-        ax.set_title("Sensor Drift Detection (QC)", fontsize=11, fontweight='bold')
+        ax.axhline(0, color="#999999", linewidth=0.8, linestyle="--", zorder=1)
+        ax.fill_between(drift_df["timestamp"], drift_df["diff"], 0,
+                        where=drift_df["diff"] >= 0, alpha=0.18, color="#4e9a8c", label="_nolegend_")
+        ax.fill_between(drift_df["timestamp"], drift_df["diff"], 0,
+                        where=drift_df["diff"] < 0,  alpha=0.18, color="#b05c5c", label="_nolegend_")
+        ax.plot(drift_df["timestamp"], drift_df["diff"],
+                color="#888888", alpha=0.55, linewidth=0.8, label="Channel A − B (instantaneous)")
+        ax.plot(drift_df["timestamp"], drift_df["rolling_7d"],
+                color="#1a3a6b", linewidth=2.2, label="7-day rolling median")
+        ax.set_title("Sensor Drift Detection — Channel A minus Channel B (QC)", fontsize=11, fontweight='bold')
         ax.set_xlabel("Date")
-        ax.set_ylabel("PM2.5 Difference (µg/m³)")
+        ax.set_ylabel("PM2.5 Difference A−B (µg/m³)")
         ax.xaxis.set_major_locator(AutoDateLocator())
         ax.xaxis.set_major_formatter(DateFormatter("%m/%d"))
         fig.autofmt_xdate(rotation=45, ha='right')
         ax.legend(loc="upper right", fontsize=8)
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.25)
         save_fig("Sensor drift", fig, "fig_drift.png")
 
     # ── 6. QUALITY CONTROL SECTION: Channel A vs B ──
@@ -2185,9 +2192,9 @@ def build_report_pdf(
         )
         y -= 4
 
-        # Table header — 6 columns (Min column removed; Range shows min–max; Duration as HH:MM)
-        _evt_cols   = ["#", "Event Start", "Peak Time", "Peak µg/m³", "Range (Min–Max µg/m³)", "Duration (hh:mm)", "Type"]
-        _evt_widths = [18,  104,            104,          70,            130,                     52,         60]
+        # Table header — 6 columns, widths sized to fit USABLE_W (480pt from L_MARGIN+8)
+        _evt_cols   = ["#", "Event Start", "Peak Time", "Peak µg/m³", "Range µg/m³",  "Dur (hh:mm)", "Type"]
+        _evt_widths = [16,   92,            92,           60,            106,             60,            54]
         _evt_x = [L_MARGIN + 8]
         for w in _evt_widths[:-1]:
             _evt_x.append(_evt_x[-1] + w)
@@ -2552,7 +2559,7 @@ def build_report_pdf(
         # Image
         image = ImageReader(str(path))
         if title == "PM2.5 Temporal Radar":
-            img_w = min(int(USABLE_W * 0.78), 390)
+            img_w = min(int(USABLE_W * 0.60), 295)   # smaller: leaves ~280pt for 3 description paras
             img_h = img_w
             x_pos = L_MARGIN + (USABLE_W - img_w) / 2
         else:
