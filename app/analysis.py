@@ -2415,21 +2415,26 @@ def build_report_pdf(
             "is well-suited to exposure science publications where figure space is limited."
         ),
         "Sensor drift": (
-            "The instantaneous difference between Channel A and Channel B (A minus B, in µg/m³) "
-            "is plotted as a thin line over the full monitoring period. Overlaid in orange is "
-            "a 7-day rolling median that filters daily noise to reveal any slow underlying drift.",
-            "A healthy sensor shows differences scattered randomly around zero with no "
-            "persistent slope. If the orange median line drifts upward over weeks, Channel A "
-            "is reading progressively higher than B — a warning sign of laser degradation, "
-            "contamination, or aging that is affecting one channel more than the other. "
-            "Cyclical daily swings suggest an environmental factor (humidity or temperature) "
-            "affecting the two channels differently. A drift beyond ±5 µg/m³ is the JHU/MIT "
-            "threshold recommending field inspection and possible recalibration.",
-            "Long-term drift is one of the most common failure modes of low-cost optical "
-            "particle counters. Detecting it early — ideally within days — lets a researcher "
-            "flag or trim affected data before months of measurements are compromised. "
-            "This chart is a direct analogue of the control charts used in analytical "
-            "laboratory quality management systems, adapted for field air quality sensors."
+            "Every reading's Channel A minus Channel B difference (in µg/m³) is plotted as "
+            "a thin gray line. The area above zero is shaded teal (A reads higher than B) and "
+            "below zero is shaded red (B reads higher than A). A dark navy line shows the "
+            "7-day rolling median of the difference, smoothing out daily noise to reveal any "
+            "slow underlying calibration drift between the two laser sensors.",
+            "A healthy sensor keeps the gray line and the navy median hovering near the dashed "
+            "zero reference with no persistent upward or downward slope. If the navy median "
+            "trends upward over weeks, Channel A is reading progressively higher than B — a "
+            "sign of laser degradation, dust build-up, or aging affecting one channel more "
+            "than the other. If it trends downward, B is drifting higher. Cyclical daily "
+            "swings suggest a temperature or humidity effect acting differently on each "
+            "sensor element. A sustained median beyond ±5 µg/m³ meets the JHU/MIT threshold "
+            "for field inspection and possible recalibration.",
+            "Long-term drift is one of the most common and hardest-to-detect failure modes of "
+            "low-cost optical particle counters. The shaded fill makes the sign of the drift "
+            "immediately visible (teal = A high, red = B high), while the navy median line "
+            "strips away day-to-day noise so a slow calibration decay becomes obvious. "
+            "Detecting drift early lets a researcher flag or trim affected data before months "
+            "of measurements are compromised — a direct analogue of the Levey-Jennings control "
+            "charts used in clinical laboratory quality management."
         ),
         "Channel A vs B": (
             "Channel A (blue line) and Channel B (orange/red line) measurements are overlaid "
