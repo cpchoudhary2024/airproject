@@ -34,13 +34,17 @@ PRESS_RANGE = (800.0, 1100.0)
 LAT_RANGE = (-90.0, 90.0)
 LON_RANGE = (-180.0, 180.0)
 
+# EPA AQI breakpoints — revised February 2024 alongside the PM2.5 NAAQS update.
+# Good upper boundary lowered from 12 µg/m³ to 9 µg/m³.
+# Unhealthy ceiling lowered from 150.4 to 125.4; Very Unhealthy ceiling from 250.4 to 225.4.
 AQI_BREAKPOINTS = [
-    (0.0, 12.0, 0, 50, "Good", "#00E400"),
-    (12.1, 35.4, 51, 100, "Moderate", "#FFFF00"),
-    (35.5, 55.4, 101, 150, "USG", "#FF7E00"),
-    (55.5, 150.4, 151, 200, "Unhealthy", "#FF0000"),
-    (150.5, 250.4, 201, 300, "Very Unhealthy", "#8F3F97"),
-    (250.5, 10000.0, 301, 500, "Hazardous", "#7E0023"),
+    (0.0,   9.0,   0,  50, "Good",          "#00E400"),
+    (9.1,  35.4,  51, 100, "Moderate",      "#FFFF00"),
+    (35.5, 55.4, 101, 150, "USG",           "#FF7E00"),
+    (55.5, 125.4, 151, 200, "Unhealthy",    "#FF0000"),
+    (125.5, 225.4, 201, 300, "Very Unhealthy", "#8F3F97"),
+    (225.5, 325.4, 301, 400, "Hazardous",   "#7E0023"),
+    (325.5, 10000.0, 401, 500, "Hazardous", "#7E0023"),
 ]
 
 
@@ -64,8 +68,13 @@ def score_name_match(col_norm: str, patterns: Iterable[str]) -> float:
             score = max(score, 1.0)
         elif pattern in col_norm:
             score = max(score, 0.7)
-        elif any(token and token in col_norm for token in pattern.split("_")):
-            score = max(score, 0.5)
+        else:
+            # Only count word tokens of length >= 3. Single/double-character tokens
+            # such as the "a"/"b" channel suffixes (from "humidity_a") would otherwise
+            # match almost any header (e.g. "a" in "private"), causing false positives.
+            toks = [t for t in pattern.split("_") if len(t) >= 3]
+            if toks and any(t in col_norm for t in toks):
+                score = max(score, 0.5)
     return score
 
 
@@ -105,13 +114,27 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, List[DetectedColumn]]:
             "pm2_5_cf_1_a",
             "pm2_5_cf_1_b",
         ],
-        "temp": ["temp", "temperature", "temperature_a", "temperature_b"],
-        "humidity": ["humidity", "humid", "rh", "humidity_a", "humidity_b"],
-        "pressure": ["pressure", "press", "baro", "pressure_a", "pressure_b"],
-        "timestamp": ["time", "timestamp", "datetime", "time_stamp"],
+        "temp": ["temp", "temperature", "temperature_a", "temperature_b",
+                 "temp_f", "temp_c", "current_temp_f", "current_temp_c", "current_temp", "air_temp"],
+        "humidity": ["humidity", "humid", "rh", "humidity_a", "humidity_b",
+                     "relative_humidity", "current_humidity", "rel_humidity"],
+        "pressure": ["pressure", "press", "baro", "pressure_a", "pressure_b",
+                     "barometric_pressure", "current_pressure", "atm_pressure"],
+        "timestamp": ["time", "timestamp", "datetime", "time_stamp", "date",
+                      "created_at", "created", "utc", "utc_time", "date_time", "epoch", "epochtime"],
         "latitude": ["lat", "latitude"],
         "longitude": ["lon", "longitude", "lng"],
     }
+    # Value-range used both for scoring and the value-only fallback below.
+    _ranges = {
+        "pm25": PM25_RANGE, "temp": TEMP_RANGE_F, "humidity": HUMID_RANGE,
+        "pressure": PRESS_RANGE, "latitude": LAT_RANGE, "longitude": LON_RANGE,
+    }
+
+    def _r_score(key, col):
+        if key == "timestamp":
+            return timestamp_score(df[col])
+        return range_score(df[col], _ranges[key]) if key in _ranges else 0.0
 
     normalized = {col: normalize_col(col) for col in df.columns}
     detected: Dict[str, List[DetectedColumn]] = {key: [] for key in patterns}
@@ -122,28 +145,33 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, List[DetectedColumn]]:
             name_score = score_name_match(norm, pats)
             if name_score == 0.0:
                 continue
-
-            if key == "timestamp":
-                r_score = timestamp_score(df[original])
-            elif key == "pm25":
-                r_score = range_score(df[original], PM25_RANGE)
-            elif key == "temp":
-                r_score = range_score(df[original], TEMP_RANGE_F)
-            elif key == "humidity":
-                r_score = range_score(df[original], HUMID_RANGE)
-            elif key == "pressure":
-                r_score = range_score(df[original], PRESS_RANGE)
-            elif key == "latitude":
-                r_score = range_score(df[original], LAT_RANGE)
-            elif key == "longitude":
-                r_score = range_score(df[original], LON_RANGE)
-            else:
-                r_score = 0.0
-
+            r_score = _r_score(key, original)
             confidence = 0.6 * name_score + 0.4 * r_score
             detected[key].append(
                 DetectedColumn(name=original, confidence=confidence, channel=channel)
             )
+
+    # ── Value-based fallback ─────────────────────────────────────────────────
+    # If a column's NAME matched nothing but its VALUES clearly fit a known
+    # quantity, still detect it. This makes parsing robust to unfamiliar CSV
+    # headers (e.g. a PM2.5 column called "particles" or a timestamp called "ts").
+    # Only apply value-only matching to the two REQUIRED, value-distinctive types
+    # (PM2.5 and timestamp). Humidity/temperature/pressure share overlapping numeric
+    # ranges (e.g. 0–100), so matching them by value alone causes false positives —
+    # they must be identified by name.
+    _claimed = {d.name for lst in detected.values() for d in lst}
+    for original, norm in normalized.items():
+        if original in _claimed:
+            continue
+        # timestamp: must parse as dates; pm25: only if nothing was named for it yet
+        if timestamp_score(df[original]) >= 0.90:
+            detected["timestamp"].append(
+                DetectedColumn(name=original, confidence=0.4 * timestamp_score(df[original]), channel=None))
+            continue
+        if not detected["pm25"] and range_score(df[original], PM25_RANGE) >= 0.90:
+            detected["pm25"].append(
+                DetectedColumn(name=original, confidence=0.4 * range_score(df[original], PM25_RANGE),
+                               channel=infer_channel(norm)))
 
     for key in detected:
         detected[key].sort(key=lambda item: item.confidence, reverse=True)
@@ -294,8 +322,7 @@ def build_narrative_summary(
                 )
 
         parts.append(
-            f"\nAIR QUALITY: The mean EPA Barkjohn-corrected PM2.5 was {pm_val:.1f} µg/m³ "
-            f"(average AQI {int(aqi_avg)} — {aqi_cat}), {health_msg} "
+            f"\nAIR QUALITY: The mean EPA Barkjohn-corrected PM2.5 was {pm_val:.1f} µg/m³, {health_msg} "
             f"{who_comparison}"
         )
 
@@ -771,9 +798,9 @@ def build_report_markdown(summary: Dict[str, Any], quality_rows: List[Dict[str, 
         f"**Total Observations:** {summary['total_readings']} readings",
         f"**Data Quality Score:** {summary['quality_score']}% (percentage of valid readings)",
         "",
-        f"**Current Air Quality:** AQI {summary['aqi_current']} ({summary['aqi_category']})",
-        f"**Period Average PM2.5:** {summary['pm25_average']} µg/m³",
-        f"**Period Average AQI:** {summary['aqi_average']} ({summary['aqi_category']})",
+        f"**Period Average PM2.5 (raw):** {summary['pm25_average']} µg/m³",
+        f"**Period Average PM2.5 (EPA-corrected):** {summary.get('pm25_average_epa_corrected', '—')} µg/m³",
+        f"**WHO 24-hour guideline:** 15 µg/m³  |  **EPA 24-hour standard:** 35 µg/m³",
         "",
         "---",
         "",
@@ -1164,10 +1191,16 @@ def build_decomposition(series: pd.Series, period: int = None) -> pd.DataFrame:
 
 
 def build_regression_diagnostics(x: pd.Series, y: pd.Series, x_label: str) -> Dict[str, Any]:
-    data = pd.DataFrame({"x": x, "y": y}).dropna()
-    if len(data) < 10:
-        return {"x": [], "y": [], "fitted": [], "residuals": [], "r2": None, "label": x_label}
-    coeffs = np.polyfit(data["x"], data["y"], 1)
+    _empty = {"x": [], "y": [], "fitted": [], "residuals": [], "r2": None, "label": x_label}
+    data = pd.DataFrame({"x": x, "y": y})
+    data = data.replace([np.inf, -np.inf], np.nan).dropna()
+    # Need enough points AND non-degenerate variance in x, or polyfit/SVD can fail.
+    if len(data) < 10 or float(data["x"].std() or 0) < 1e-9 or float(data["y"].std() or 0) < 1e-9:
+        return _empty
+    try:
+        coeffs = np.polyfit(data["x"], data["y"], 1)
+    except (np.linalg.LinAlgError, ValueError, TypeError):
+        return _empty
     slope, intercept = float(coeffs[0]), float(coeffs[1])
     fitted = data["x"] * slope + intercept
     residuals = data["y"] - fitted
@@ -1191,35 +1224,32 @@ def build_sensor_drift(df: pd.DataFrame) -> pd.DataFrame:
     if "pm25_a" not in df.columns or "pm25_b" not in df.columns:
         return pd.DataFrame()
     drift = df[["timestamp", "pm25_a", "pm25_b"]].copy()
-    
-    # Convert to numeric to prevent string subtraction errors
+
     drift["pm25_a"] = pd.to_numeric(drift["pm25_a"], errors="coerce")
     drift["pm25_b"] = pd.to_numeric(drift["pm25_b"], errors="coerce")
-    
     drift = drift.dropna(subset=["timestamp", "pm25_a", "pm25_b"])
     if drift.empty:
         return pd.DataFrame()
-    
-    # Explicitly ensure float dtype after coercion to prevent arithmetic errors
+
     drift["pm25_a"] = drift["pm25_a"].astype(float)
     drift["pm25_b"] = drift["pm25_b"].astype(float)
-    
-    drift = drift.set_index("timestamp").sort_index()
-    
-    # RESEARCH-GRADE: Detect actual gaps and inject NaN only at gap boundaries
-    time_diffs = drift.index.to_series().diff()
-    gap_threshold = pd.Timedelta(hours=1)
-    gap_indices = time_diffs[time_diffs > gap_threshold].index
-    
-    # Calculate drift
     drift["diff"] = drift["pm25_a"] - drift["pm25_b"]
-    
-    # Inject NaN at gap starts to force line breaks
-    if len(gap_indices) > 0:
-        drift.loc[gap_indices, "diff"] = np.nan
-    
+    drift = drift.set_index("timestamp").sort_index()
+
+    # Resample to hourly mean — hours with no data naturally become NaN, giving correct line breaks
     hourly = drift["diff"].resample("h").mean()
-    rolling = hourly.rolling(24 * 7, min_periods=24 * 3).median()
+
+    # Detect gap hours (consecutive NaN blocks > 1 hour) and keep them as NaN so the plot breaks correctly
+    # Rolling trend: use 3-day window with min 1 day; adaptive to dataset length
+    n_hours = len(hourly.dropna())
+    if n_hours >= 24 * 14:
+        roll_win, roll_min = 24 * 7, 24
+    elif n_hours >= 24 * 3:
+        roll_win, roll_min = 24 * 3, 12
+    else:
+        roll_win, roll_min = max(6, n_hours // 2), 3
+    rolling = hourly.rolling(roll_win, min_periods=roll_min, center=True).median()
+
     return pd.DataFrame(
         {
             "timestamp": hourly.index,
@@ -1302,10 +1332,15 @@ def build_pm25_temporal_radar(
     if cleaned.empty:
         return {"labels": [], "values": [], "max_value": 0}
 
-    # Hours are already in local time after tz_convert in analyze_dataset
+    # Hours are already in local time after tz_convert in analyze_dataset.
+    # Use EPA-corrected PM2.5 to stay consistent with every other figure and
+    # number in the report (averages, daily table, exceedances all use corrected).
     temp_df = cleaned.copy()
     temp_df["hour"] = temp_df.index.hour
-    hourly_avg = temp_df.groupby("hour")["pm25"].mean().reindex(range(24), fill_value=0)
+    _pm_src = (temp_df["pm25_corrected"].fillna(temp_df["pm25"])
+               if "pm25_corrected" in temp_df.columns else temp_df["pm25"])
+    temp_df = temp_df.assign(_pm_src=_pm_src)
+    hourly_avg = temp_df.groupby("hour")["_pm_src"].mean().reindex(range(24), fill_value=0)
 
     # Build a readable timezone label for the chart axis
     if tz_label and tz_label != "UTC":
@@ -1322,7 +1357,9 @@ def build_pm25_temporal_radar(
         offset_label = " UTC"
 
     max_pm = max(hourly_avg.max(), 0.1)
-    labels = [f"{int(h):02d}:00{offset_label}" for h in hourly_avg.index]
+    # Show only the hour number on each tick; the timezone is stated once in the
+    # chart title (and caption), so per-tick suffixes would only add clutter.
+    labels = [f"{int(h):02d}" for h in hourly_avg.index]
 
     return {
         "labels": labels,
@@ -1344,8 +1381,14 @@ def build_report_figures(
     decomposition_df: pd.DataFrame = None,
     rolling_1h_timestamps: pd.Index = None,
     rolling_1h_values: pd.Series = None,
+    tz_label: str = "UTC",
+    heatmap_summary: pd.DataFrame = None,
 ) -> List[Tuple[str, Path]]:
     figures: List[Tuple[str, Path]] = []
+    # When the user selected a timezone on the home page, the data is already
+    # converted to it, so labels must say that zone — never UTC or a GPS-LST guess.
+    _user_tz = bool(tz_label and tz_label != "UTC")
+    _user_tz_short = tz_label.split("/")[-1].replace("_", " ") if _user_tz else "UTC"
 
     def save_fig(title: str, fig: plt.Figure, filename: str) -> None:
         path = output_dir / filename
@@ -1452,11 +1495,15 @@ def build_report_figures(
     # ── 3. DIURNAL PATTERN — kept but with explicit gap caveat in subtitle ──
     if not diurnal_df.empty:
         fig, ax = plt.subplots(figsize=(8.0, 3.6))
-        ax.fill_between(diurnal_df["hour"], diurnal_df["p10"], diurnal_df["p90"], color="#f6aa1c", alpha=0.2, label="10th–90th percentile")
+        ax.fill_between(diurnal_df["hour"], diurnal_df["p10"], diurnal_df["p90"], color="#aaaaaa", alpha=0.35, label="10th–90th percentile")
         ax.plot(diurnal_df["hour"], diurnal_df["mean"], color="#1f7a8c", label="Mean", linewidth=2)
 
         hour_label_suffix = diurnal_df.get("hour_label_suffix", " UTC").iloc[0] if "hour_label_suffix" in diurnal_df.columns else " UTC"
-        if "LST" in hour_label_suffix:
+        if _user_tz:
+            # User-selected timezone is authoritative: data already in local time.
+            title = f"Typical Daily Pattern by Hour ({_user_tz_short} local time)"
+            xlabel = f"Hour of Day ({_user_tz_short} local time, 0–23)"
+        elif "LST" in hour_label_suffix:
             title = f"Typical Daily Pattern by Hour ({hour_label_suffix})"
             xlabel = f"Hour of Day {hour_label_suffix}"
         else:
@@ -1467,6 +1514,7 @@ def build_report_figures(
         ax.set_xlabel(xlabel)
         ax.set_ylabel("PM2.5 (µg/m³)")
         ax.set_xticks(range(0, 24, 2))
+        ax.set_xlim(-0.5, 23.5)
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(True, alpha=0.3)
 
@@ -1525,57 +1573,189 @@ def build_report_figures(
 
     # ── 5. QUALITY CONTROL SECTION: Sensor Drift ──
     if not drift_df.empty:
-        fig, ax = plt.subplots(figsize=(8.0, 3.6))
-        ax.axhline(0, color="#999999", linewidth=0.8, linestyle="--", zorder=1)
-        ax.fill_between(drift_df["timestamp"], drift_df["diff"], 0,
-                        where=drift_df["diff"] >= 0, alpha=0.18, color="#4e9a8c", label="_nolegend_")
-        ax.fill_between(drift_df["timestamp"], drift_df["diff"], 0,
-                        where=drift_df["diff"] < 0,  alpha=0.18, color="#b05c5c", label="_nolegend_")
-        ax.plot(drift_df["timestamp"], drift_df["diff"],
-                color="#888888", alpha=0.55, linewidth=0.8, label="Channel A − B (instantaneous)")
-        ax.plot(drift_df["timestamp"], drift_df["rolling_7d"],
-                color="#1a3a6b", linewidth=2.2, label="7-day rolling median")
+        fig, ax = plt.subplots(figsize=(8.0, 3.8))
+        # ±1 µg/m³ normal-variation band (gray fill, no legend clutter)
+        ax.axhspan(-1, 1, color="#dddddd", alpha=0.45, zorder=0, label="±1 µg/m³ normal variation")
+        ax.axhline(0, color="#555555", linewidth=0.9, linestyle="--", zorder=2)
+        # Reference thresholds
+        ax.axhline( 2, color="#cc7700", linewidth=0.7, linestyle=":", zorder=2)
+        ax.axhline(-2, color="#cc7700", linewidth=0.7, linestyle=":", zorder=2, label="±2 µg/m³ investigation threshold")
+
+        _diff   = drift_df["diff"].values
+        _ts     = drift_df["timestamp"]
+        _valid  = np.where(np.isfinite(_diff), _diff, np.nan)
+        ax.fill_between(_ts, _valid, 0,
+                        where=np.nan_to_num(_valid, nan=0) >= 0,
+                        alpha=0.22, color="#4e9a8c", label="_nolegend_")
+        ax.fill_between(_ts, _valid, 0,
+                        where=np.nan_to_num(_valid, nan=0) < 0,
+                        alpha=0.22, color="#b05c5c", label="_nolegend_")
+        ax.plot(_ts, _valid,
+                color="#888888", alpha=0.55, linewidth=0.8, label="Hourly mean A − B")
+        _rolling = drift_df["rolling_7d"].values
+        ax.plot(_ts, np.where(np.isfinite(_rolling), _rolling, np.nan),
+                color="#1a3a6b", linewidth=2.2, label="Rolling median trend")
+
         ax.set_title("Sensor Drift Detection — Channel A minus Channel B (QC)", fontsize=11, fontweight='bold')
         ax.set_xlabel("Date")
         ax.set_ylabel("PM2.5 Difference A−B (µg/m³)")
         ax.xaxis.set_major_locator(AutoDateLocator())
         ax.xaxis.set_major_formatter(DateFormatter("%m/%d"))
         fig.autofmt_xdate(rotation=45, ha='right')
-        ax.legend(loc="upper right", fontsize=8)
-        ax.grid(True, alpha=0.25)
+        ax.legend(loc="upper right", fontsize=7.5, framealpha=0.85)
+        ax.grid(True, alpha=0.20)
         save_fig("Sensor drift", fig, "fig_drift.png")
 
-    # ── 6. QUALITY CONTROL SECTION: Channel A vs B ──
-    if channel_series.get("timestamps"):
-        fig, ax = plt.subplots(figsize=(8.0, 3.6))
-        timestamps = pd.to_datetime(channel_series["timestamps"], errors="coerce")
-        channel_a = channel_series["a"].copy() if isinstance(channel_series["a"], pd.Series) else pd.Series(channel_series["a"])
-        channel_b = channel_series["b"].copy() if isinstance(channel_series["b"], pd.Series) else pd.Series(channel_series["b"])
+    # ── 6. QUALITY CONTROL: Channel A vs B agreement (scatter + 1:1 + regression) ──
+    if channel_series.get("a") is not None and channel_series.get("b") is not None:
+        _a = pd.to_numeric(pd.Series(channel_series["a"]), errors="coerce")
+        _b = pd.to_numeric(pd.Series(channel_series["b"]), errors="coerce")
+        _pair = pd.DataFrame({"a": _a.values, "b": _b.values}).replace([np.inf, -np.inf], np.nan).dropna()
+        if len(_pair) >= 10:
+            a_v = _pair["a"].values; b_v = _pair["b"].values
+            # ── 6a. Agreement scatter ──────────────────────────────────────────
+            fig, ax = plt.subplots(figsize=(8.0, 4.4))
+            ax.scatter(a_v, b_v, s=6, alpha=0.30, color="#1f7a8c", edgecolors="none", label="Paired readings")
+            _lim = float(max(np.nanpercentile(a_v, 99.5), np.nanpercentile(b_v, 99.5), 1.0))
+            ax.plot([0, _lim], [0, _lim], color="#444444", lw=1.2, ls="--", label="1:1 (perfect agreement)")
+            # Ordinary least-squares fit B = m·A + c
+            try:
+                m, c = np.polyfit(a_v, b_v, 1)
+                _xline = np.array([0, _lim])
+                ax.plot(_xline, m * _xline + c, color="#f25c54", lw=1.6,
+                        label=f"Fit: B = {m:.2f}·A {'+' if c >= 0 else '−'} {abs(c):.2f}")
+                _ss_res = float(np.sum((b_v - (m * a_v + c)) ** 2))
+                _ss_tot = float(np.sum((b_v - np.mean(b_v)) ** 2))
+                _r2 = 1 - _ss_res / _ss_tot if _ss_tot > 0 else float("nan")
+            except Exception:
+                _r2 = float(channel_series.get("r2") or float("nan"))
+            ax.set_xlim(0, _lim); ax.set_ylim(0, _lim); ax.set_aspect("equal", adjustable="box")
+            _r2_txt = f"R² = {_r2:.3f}" if _r2 == _r2 else "R² = n/a"
+            ax.set_title(f"Channel A vs B Agreement — {_r2_txt} (QC)", fontsize=11, fontweight="bold")
+            ax.set_xlabel("Channel A PM2.5 (µg/m³)"); ax.set_ylabel("Channel B PM2.5 (µg/m³)")
+            ax.legend(loc="upper left", fontsize=7.5, framealpha=0.9)
+            ax.grid(True, alpha=0.25)
+            save_fig("Channel A vs B", fig, "fig_channel_ab.png")
 
-        if len(timestamps) > 1:
-            time_diffs = timestamps.diff()
-            gap_threshold = pd.Timedelta(hours=1)
-            gap_mask = time_diffs > gap_threshold
+            # ── 6b. Bland–Altman (method-agreement) ────────────────────────────
+            _mean_ab = (a_v + b_v) / 2.0
+            _diff_ab = a_v - b_v
+            _bias = float(np.mean(_diff_ab)); _sd = float(np.std(_diff_ab, ddof=1))
+            _loa_hi = _bias + 1.96 * _sd; _loa_lo = _bias - 1.96 * _sd
+            _within = float(np.mean((_diff_ab >= _loa_lo) & (_diff_ab <= _loa_hi)) * 100)
+            # X range trimmed to 99th pct so the dense low-concentration region is readable
+            _xmax = float(np.nanpercentile(_mean_ab, 99))
+            _ypad = max(_loa_hi - _bias, _bias - _loa_lo, float(np.nanstd(_diff_ab)) * 0.5, 0.5)
+            _ylo, _yhi = _bias - 2.6 * (_loa_hi - _bias if _loa_hi > _bias else _ypad), _bias + 2.6 * (_loa_hi - _bias if _loa_hi > _bias else _ypad)
 
-            if gap_mask.any():
-                if hasattr(gap_mask, 'index'):
-                    gap_start_indices = gap_mask[gap_mask].index
-                else:
-                    gap_start_indices = np.where(gap_mask)[0]
-                channel_a[gap_start_indices] = np.nan
-                channel_b[gap_start_indices] = np.nan
+            fig, ax = plt.subplots(figsize=(8.2, 4.2))
+            # Shaded 95% limits-of-agreement band
+            ax.axhspan(_loa_lo, _loa_hi, color="#cfe3ea", alpha=0.45, zorder=0,
+                       label="95% limits of agreement")
+            # Density via hexbin (log count) — reveals where the mass of points sits
+            hb = ax.hexbin(_mean_ab, _diff_ab, gridsize=42, cmap="Blues", bins="log",
+                           mincnt=1, linewidths=0.0, zorder=1, extent=(0, max(_xmax, 1), _ylo, _yhi))
+            # Highlight readings that fall OUTSIDE the limits (the notable disagreements)
+            _out = (_diff_ab < _loa_lo) | (_diff_ab > _loa_hi)
+            if _out.any():
+                ax.scatter(_mean_ab[_out], _diff_ab[_out], s=10, color="#c0392b",
+                           alpha=0.55, edgecolors="none", zorder=3,
+                           label=f"Outside limits ({int(_out.sum())} pts)")
+            # Proportional-bias check: regression of difference on mean
+            try:
+                _ps, _pi = np.polyfit(_mean_ab, _diff_ab, 1)
+                _xx = np.array([0, max(_xmax, 1)])
+                ax.plot(_xx, _ps * _xx + _pi, color="#6a4c93", lw=1.4, ls="-.",
+                        zorder=4, label=f"Trend (slope {_ps:+.3f})")
+            except Exception:
+                _ps = float("nan")
+            # Bias + limit lines with right-edge labels
+            ax.axhline(_bias, color="#1a3a6b", lw=1.8, zorder=5)
+            ax.axhline(_loa_hi, color="#cc7700", lw=1.1, ls="--", zorder=5)
+            ax.axhline(_loa_lo, color="#cc7700", lw=1.1, ls="--", zorder=5)
+            ax.axhline(0, color="#888888", lw=0.7, ls=":", zorder=2)
+            _xtext = max(_xmax, 1) * 0.995
+            ax.text(_xtext, _bias, f" bias {_bias:+.2f}", va="center", ha="right",
+                    fontsize=7.5, color="#1a3a6b", fontweight="bold",
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="#1a3a6b", alpha=0.85))
+            ax.text(_xtext, _loa_hi, f" +1.96 SD {_loa_hi:+.2f}", va="bottom", ha="right", fontsize=7, color="#a4630a")
+            ax.text(_xtext, _loa_lo, f" −1.96 SD {_loa_lo:+.2f}", va="top", ha="right", fontsize=7, color="#a4630a")
+            # Stats box
+            _agree_word = "excellent" if abs(_bias) < 1 and _sd < 1.5 else ("good" if abs(_bias) < 2 else "check")
+            ax.text(0.015, 0.04,
+                    f"Mean bias = {_bias:+.2f} µg/m³   SD = {_sd:.2f}\n"
+                    f"{_within:.1f}% of readings within limits   |   agreement: {_agree_word}",
+                    transform=ax.transAxes, fontsize=7.5, va="bottom", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="#fffef5", ec="#cccccc", alpha=0.92))
+            ax.set_xlim(0, max(_xmax, 1)); ax.set_ylim(_ylo, _yhi)
+            ax.set_title("Bland–Altman — Channel Agreement (bias, 95% limits, proportional trend)",
+                         fontsize=10.5, fontweight="bold")
+            ax.set_xlabel("Mean of Channels A & B (µg/m³)")
+            ax.set_ylabel("Difference A − B (µg/m³)")
+            _cb = fig.colorbar(hb, ax=ax, pad=0.015, fraction=0.040)
+            _cb.set_label("point density (log)", fontsize=7); _cb.ax.tick_params(labelsize=6)
+            ax.legend(loc="upper right", fontsize=7, framealpha=0.9, ncol=1)
+            ax.grid(True, axis="y", alpha=0.18)
+            save_fig("Bland-Altman", fig, "fig_bland_altman.png")
 
-        ax.plot(timestamps, channel_a, color="#1f7a8c", alpha=0.6, label="Channel A", linewidth=1.5)
-        ax.plot(timestamps, channel_b, color="#f25c54", alpha=0.6, label="Channel B", linewidth=1.5)
-        ax.set_title("Channel A vs B Comparison (QC Consistency Check)", fontsize=11, fontweight='bold')
-        ax.set_xlabel("Date")
-        ax.set_ylabel("PM2.5 (µg/m³)")
-        ax.xaxis.set_major_locator(AutoDateLocator())
-        ax.xaxis.set_major_formatter(DateFormatter("%m/%d"))
-        fig.autofmt_xdate(rotation=45, ha='right')
-        ax.legend(loc="upper right", fontsize=8)
-        ax.grid(True, alpha=0.3)
-        save_fig("Channel A vs B", fig, "fig_channel_ab.png")
+    # ── 7. QUALITY CONTROL: Weekly heatmap (day-of-week × hour, EPA-corrected) ──
+    if heatmap_summary is not None and not heatmap_summary.empty:
+        _order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        _hm = heatmap_summary.reindex([d for d in _order if d in heatmap_summary.index])
+        _hm = _hm.reindex(columns=[h for h in range(24) if h in heatmap_summary.columns])
+        if not _hm.empty and _hm.notna().to_numpy().any():
+            import matplotlib.colors as _mcolors
+            _vals = _hm.values.astype(float)
+            _ncols = _vals.shape[1]; _nrows = _vals.shape[0]
+            _finite = _vals[np.isfinite(_vals)]
+            _vmin = float(np.nanpercentile(_finite, 2))
+            _vmax = max(float(np.nanpercentile(_finite, 98)), _vmin + 0.1)
+
+            fig, ax = plt.subplots(figsize=(10.2, 3.9))
+            # pcolormesh with crisp white cell borders; masked cells shown light grey
+            _masked = np.ma.masked_invalid(_vals)
+            _cmap = plt.get_cmap("YlOrRd").copy(); _cmap.set_bad("#eeeeee")
+            _mesh = ax.pcolormesh(np.arange(_ncols + 1), np.arange(_nrows + 1), _masked,
+                                  cmap=_cmap, vmin=_vmin, vmax=_vmax,
+                                  edgecolors="white", linewidth=0.6)
+            ax.set_aspect("auto"); ax.invert_yaxis()
+
+            # Per-cell value labels (small, contrast-aware) — turns the grid into a readable table
+            _span = max(_vmax - _vmin, 1e-6)
+            for _r in range(_nrows):
+                for _c in range(_ncols):
+                    _v = _vals[_r, _c]
+                    if not np.isfinite(_v):
+                        continue
+                    _frac = (min(max(_v, _vmin), _vmax) - _vmin) / _span
+                    _txtc = "white" if _frac > 0.62 else "#333333"
+                    ax.text(_c + 0.5, _r + 0.5, f"{_v:.0f}", ha="center", va="center",
+                            fontsize=5.6, color=_txtc)
+
+            # Flag the single worst (highest) day-hour cell
+            _wr, _wc = np.unravel_index(np.nanargmax(np.where(np.isfinite(_vals), _vals, -np.inf)), _vals.shape)
+            ax.add_patch(plt.Rectangle((_wc, _wr), 1, 1, fill=False, edgecolor="#1a3a6b", linewidth=1.8))
+
+            ax.set_xticks(np.arange(0, _ncols, 2) + 0.5)
+            ax.set_xticklabels([str(_hm.columns[i]) for i in range(0, _ncols, 2)], fontsize=7.5)
+            ax.set_yticks(np.arange(_nrows) + 0.5)
+            ax.set_yticklabels([d[:3] for d in _hm.index], fontsize=8)
+            ax.tick_params(length=0)
+            _hr_lbl = "UTC" if not _user_tz else f"{_user_tz_short} local time"
+            ax.set_xlabel(f"Hour of day ({_hr_lbl})", fontsize=9); ax.set_ylabel("Day of week", fontsize=9)
+            ax.set_title("Weekly Pollution Pattern — Mean PM2.5 by Day × Hour (µg/m³)",
+                         fontsize=11, fontweight="bold")
+
+            _cb = fig.colorbar(_mesh, ax=ax, pad=0.012, fraction=0.040)
+            _cb.set_label("Mean PM2.5 (µg/m³)", fontsize=8); _cb.ax.tick_params(labelsize=7)
+            # Mark WHO 15 / EPA 35 on the colour scale if within range
+            for _thr, _lab, _col in ((15, "WHO 15", "#00a651"), (35, "EPA 35", "#b30000")):
+                if _vmin <= _thr <= _vmax:
+                    _cb.ax.axhline(_thr, color=_col, lw=1.2)
+                    _cb.ax.text(1.6, _thr, _lab, transform=_cb.ax.get_yaxis_transform(),
+                                va="center", ha="left", fontsize=6.5, color=_col, fontweight="bold")
+            fig.tight_layout()
+            save_fig("Weekly heatmap", fig, "fig_weekly_heatmap.png")
 
     # Data Quality Profile Radar intentionally omitted — replaced by Data Quality Table in PDF.
 
@@ -1620,6 +1800,12 @@ def build_report_pdf(
 
     y = height - T_MARGIN
     page_num = [1]
+
+    # Single source of truth for hour-of-day labelling. When the user selected a
+    # timezone, the data is already in it, so descriptions say e.g. "New York
+    # local time" instead of UTC; when UTC, the wording is unchanged.
+    _is_utc_rep = not (tz_label and tz_label != "UTC")
+    _hour_tz = "UTC" if _is_utc_rep else f"{tz_label.split('/')[-1].replace('_', ' ')} local time"
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -1688,26 +1874,59 @@ def build_report_pdf(
     def draw_wrapped(text: str, x_offset: int = 0, font_size: int = 9,
                      color: tuple = None, bold: bool = False,
                      para_gap: int = 9, indent: int = None) -> None:
-        """Word-wrap text within the usable column, with auto-page-break.
-        `indent` is a legacy alias — absolute x = L_MARGIN + indent."""
+        """Word-wrap and fully justify text within the usable column, with auto-page-break."""
         nonlocal y
         fn = "Helvetica-Bold" if bold else "Helvetica"
         pdf.setFont(fn, font_size)
+        # Right-side breathing room so text never touches the margin/box border
+        _R_PAD = 8
         if indent is not None:
-            col_x = L_MARGIN + indent
-            effective_offset = indent - (CONTENT_X - L_MARGIN)
+            col_x  = L_MARGIN + indent
+            avail_w = USABLE_W - indent - _R_PAD
         else:
-            col_x = CONTENT_X + x_offset
-            effective_offset = x_offset
-        max_chars = max(40, int((USABLE_W - max(0, effective_offset)) / (font_size * 0.558)))
+            col_x  = CONTENT_X + x_offset
+            avail_w = USABLE_W - (CONTENT_X - L_MARGIN) - x_offset - _R_PAD
+        avail_w = max(avail_w, 60)
+
+        # Pixel-width-accurate word wrapping
+        space_w = pdf.stringWidth(" ", fn, font_size)
+        words = text.split()
+        lines: list[list[str]] = []
+        cur_words: list[str] = []
+        cur_w = 0.0
+        for word in words:
+            ww = pdf.stringWidth(word, fn, font_size)
+            if cur_words and cur_w + space_w + ww > avail_w:
+                lines.append(cur_words)
+                cur_words = [word]
+                cur_w = ww
+            else:
+                if cur_words:
+                    cur_w += space_w
+                cur_words.append(word)
+                cur_w += ww
+        if cur_words:
+            lines.append(cur_words)
+
         _set_fill(color or C_BODY)
-        for line in textwrap.wrap(text, width=max_chars):
+        for i, line_words in enumerate(lines):
             _check_space(font_size + 4)
-            pdf.setFont(fn, font_size)      # restore after possible next_page()
-            pdf.drawString(col_x, y, line)
+            pdf.setFont(fn, font_size)
+            is_last = (i == len(lines) - 1)
+            if is_last or len(line_words) == 1:
+                # Last line (or single word): left-align
+                pdf.drawString(col_x, y, " ".join(line_words))
+            else:
+                # Full justification: distribute whitespace evenly between words
+                total_word_w = sum(pdf.stringWidth(w, fn, font_size) for w in line_words)
+                gap = (avail_w - total_word_w) / (len(line_words) - 1)
+                xpos = col_x
+                for word in line_words:
+                    pdf.drawString(xpos, y, word)
+                    xpos += pdf.stringWidth(word, fn, font_size) + gap
             y -= font_size + 4
         _set_fill(C_BODY)
-        y -= para_gap      # inter-paragraph breathing room
+        y -= para_gap
 
     def section_header(num: str, title: str, start_new_page: bool = False) -> None:
         """Render a numbered section heading with accent bar and ruled underline."""
@@ -1837,9 +2056,9 @@ def build_report_pdf(
 
     # Quick-stats row (3 tiles)
     _qs = [
-        ("Average PM2.5",  f"{summary.get('pm25_average', '—')} µg/m³"),
-        ("Average AQI",    f"{summary.get('aqi_average', '—')} — {summary.get('aqi_category', '—')}"),
-        ("Quality Score",  f"{summary.get('quality_score', '—')}%"),
+        ("Avg PM2.5 (raw)",        f"{summary.get('pm25_average', '—')} µg/m³"),
+        ("Avg PM2.5 (EPA-corr.)",  f"{summary.get('pm25_average_epa_corrected', '—')} µg/m³"),
+        ("Quality Score",          f"{summary.get('quality_score', '—')}%"),
     ]
     tile_w = (USABLE_W - 12) / 3
     tile_x = L_MARGIN
@@ -1928,15 +2147,16 @@ def build_report_pdf(
 
     section_header("1.", "Executive Summary")
     draw_line(f"Quality Score: {summary['quality_score']}%   |   Total Readings: {summary['total_readings']}", indent=12, font_size=10)
-    draw_line(f"Average PM2.5: {summary['pm25_average']} µg/m³   |   Average AQI: {summary['aqi_average']} ({summary['aqi_category']})", indent=12, font_size=10)
+    draw_line(f"Average PM2.5 (raw): {summary['pm25_average']} µg/m³   |   Average PM2.5 (EPA-corrected): {summary.get('pm25_average_epa_corrected', '—')} µg/m³", indent=12, font_size=10)
     y -= 6
     draw_wrapped(
-        "About the instrument: Each PurpleAir monitor contains two independent laser particle sensor "
-        "channels — Channel A and Channel B — both measuring PM2.5 simultaneously. This dual-channel "
-        "design is not redundancy for redundancy's sake: comparing the two channels is a built-in "
-        "quality check that can detect sensor fouling, electronic drift, or partial blockage before "
-        "they affect reported data. The sensor-health metrics and QC charts in this report are "
-        "grounded in that dual-channel architecture.",
+        "About the instrument: Each PurpleAir monitor houses two independent laser particle sensors — "
+        "Channel A and Channel B — that measure PM2.5 simultaneously. The value of running two channels "
+        "goes beyond simple backup: their agreement is the primary instrument health check. When both "
+        "channels track closely, the data are reliable. When they diverge, it indicates sensor fouling, "
+        "electronic drift, or partial blockage — problems that can be identified and acted on before "
+        "they corrupt reported values. The sensor-health metrics and QC charts throughout this report "
+        "are rooted in this dual-channel architecture.",
         indent=12, font_size=9
     )
     if summary.get('quality_narrative'):
@@ -1954,15 +2174,34 @@ def build_report_pdf(
         "and excluded from all downstream calculations.",
         indent=12, font_size=9
     )
-    draw_wrapped(
-        "EPA Barkjohn Correction: Raw PurpleAir laser-scattering readings systematically overestimate "
-        "true PM2.5 mass concentration, particularly at elevated humidity. The EPA-validated correction "
-        "formula (Barkjohn et al., 2021) is applied: Corrected PM2.5 = 0.534 × raw_PM + 5.604 − "
-        "0.0844 × RH, where RH is relative humidity in percent. When humidity data are unavailable "
-        "the simplified form (0.534 × raw_PM + 5.604) is used; this increases uncertainty at "
-        "high-humidity conditions and is noted in the data quality flags.",
-        indent=12, font_size=9
-    )
+    _hum_used   = summary.get("humidity_used", False)
+    _mean_rh_v  = summary.get("mean_rh")
+    _rh_min_v   = summary.get("rh_min")
+    _rh_max_v   = summary.get("rh_max")
+    _pm25_raw_v = summary.get("pm25_average", 0.0)
+    if _hum_used and _mean_rh_v is not None:
+        _ex_corr = round(0.534 * _pm25_raw_v - 0.0844 * _mean_rh_v + 5.604, 2)
+        _bk_text = (
+            f"EPA Barkjohn Correction (Barkjohn et al., 2021): Raw PurpleAir laser-scattering readings "
+            f"overestimate true PM2.5, especially at high humidity. The full correction formula — "
+            f"Corrected PM2.5 = 0.534 × raw_PM − 0.0844 × RH + 5.604 — was applied to every reading "
+            f"in this dataset using the concurrent per-reading relative humidity (RH). "
+            f"Humidity was available throughout this dataset: mean RH = {_mean_rh_v}% "
+            f"(range {_rh_min_v}–{_rh_max_v}%). "
+            f"Example using the dataset mean values: 0.534 × {_pm25_raw_v} − 0.0844 × {_mean_rh_v} "
+            f"+ 5.604 = {_ex_corr} µg/m³ (corrected from {_pm25_raw_v} µg/m³ raw)."
+        )
+    else:
+        _bk_text = (
+            "EPA Barkjohn Correction (Barkjohn et al., 2021): Raw PurpleAir laser-scattering readings "
+            "overestimate true PM2.5, especially at high humidity. The full formula is: "
+            "Corrected PM2.5 = 0.534 × raw_PM − 0.0844 × RH + 5.604. "
+            "Relative humidity was NOT available for this dataset, so the humidity-dependent Barkjohn "
+            "correction could not be applied. Uncorrected (raw) PM2.5 is reported instead. Because raw "
+            "PurpleAir readings tend to overestimate at elevated humidity, the reported values should be "
+            "treated as an upper bound and interpreted with caution where humidity is typically high."
+        )
+    draw_wrapped(_bk_text, indent=12, font_size=9)
     _tz_methods_note = (
         f"Timestamps: All timestamps and time-of-day patterns in this report are displayed in "
         f"{tz_label} (the timezone selected at analysis time). "
@@ -2033,7 +2272,28 @@ def build_report_pdf(
                 "results are used in any formal report.",
                 indent=12, font_size=9, color=(0.75, 0.10, 0.10)
             )
-        y -= 10
+        y -= 6
+        # Barkjohn correction transparency block in Sensor Performance
+        _sp_hum   = summary.get("humidity_used", False)
+        _sp_rh    = summary.get("mean_rh")
+        _sp_rh_mn = summary.get("rh_min")
+        _sp_rh_mx = summary.get("rh_max")
+        _sp_pm    = summary.get("pm25_average", 0.0)
+        if _sp_hum and _sp_rh is not None:
+            _sp_corr = round(0.534 * _sp_pm - 0.0844 * _sp_rh + 5.604, 2)
+            draw_wrapped(
+                f"EPA Barkjohn correction applied per reading using concurrent RH. "
+                f"Dataset RH: mean {_sp_rh}%, range {_sp_rh_mn}–{_sp_rh_mx}%. "
+                f"Worked example (dataset means): 0.534 × {_sp_pm} − 0.0844 × {_sp_rh} + 5.604 = {_sp_corr} µg/m³.",
+                indent=12, font_size=9, color=(0.30, 0.30, 0.30)
+            )
+        else:
+            draw_wrapped(
+                "Humidity data unavailable — the Barkjohn correction could not be applied, so raw "
+                "(uncorrected) PM2.5 is reported. Raw readings may overestimate at high humidity.",
+                indent=12, font_size=9, color=(0.55, 0.35, 0.00)
+            )
+        y -= 4
 
     # ── Section 4: Analytical Methods ────────────────────────────────────────
 
@@ -2078,9 +2338,11 @@ def build_report_pdf(
         ("PM2.5",
          "Particles smaller than 2.5 micrometers in diameter — about 30 times thinner than a human hair. "
          "They are the most health-relevant size because they penetrate deep into the lungs and enter the bloodstream."),
-        ("AQI (Air Quality Index)",
-         "The EPA's public health communication scale, 0–500. Green (0–50) = Good; Yellow (51–100) = Moderate; "
-         "Orange (101–150) = Unhealthy for Sensitive Groups; Red (151–200) = Unhealthy; Purple (201+) = Very Unhealthy / Hazardous."),
+        ("Why this report uses PM2.5 concentration, not AQI",
+         "The U.S. EPA Air Quality Index is a composite of multiple pollutants (PM2.5, PM10, O3, NO2, SO2, CO). "
+         "This instrument measures only PM2.5, so a valid multi-pollutant AQI cannot be derived from it. "
+         "All thresholds in this report are therefore stated as PM2.5 mass concentration (µg/m³) against the "
+         "WHO 24-hour guideline (15) and EPA 24-hour standard (35), which is the scientifically correct basis."),
         ("EPA Barkjohn Correction",
          "A regression formula (Barkjohn et al., 2021) developed specifically to correct PurpleAir low-cost sensor "
          "readings to align with co-located EPA reference monitors. It accounts for the sensor's humidity sensitivity."),
@@ -2105,9 +2367,13 @@ def build_report_pdf(
         ("RH (Relative Humidity)",
          "The amount of water vapor in the air as a percentage of the maximum possible at that temperature. "
          "High RH causes laser particle counters to overcount particles because water droplets scatter light similarly to dust."),
-        ("UTC (Coordinated Universal Time)",
-         "The global time standard with no daylight-saving shifts. All sensor timestamps in this report are in UTC. "
-         "To find local time, add your UTC offset (e.g., UTC−5 for US Eastern Standard, UTC+5:30 for India)."),
+        (("UTC (Coordinated Universal Time)"
+          if _is_utc_rep else "Timezone"),
+         ("The global time standard with no daylight-saving shifts. All sensor timestamps in this report are in UTC. "
+          "To find local time, add your UTC offset (e.g., UTC−5 for US Eastern Standard, UTC+5:30 for India)."
+          if _is_utc_rep else
+          f"All timestamps in this report are shown in {_hour_tz} ({tz_label}). The raw sensor data were "
+          "recorded in UTC and converted to this local timezone before all daily/hourly grouping and analysis.")),
         ("hPa (Hectopascals)",
          "The SI unit of atmospheric pressure. Standard sea-level pressure is ~1013 hPa. "
          "Readings outside 800–1100 hPa indicate a sensor fault or extreme elevation."),
@@ -2238,27 +2504,43 @@ def build_report_pdf(
 
     section_header("6.", "Comparison to Regulatory Standards")
     draw_wrapped(
-        "EPA 24-Hour PM2.5 Standard — 35 µg/m³: This is the primary short-term standard used in this "
-        "report. Exceeding 35 µg/m³ averaged over 24 hours is considered 'Unhealthy for Sensitive Groups' "
-        "(AQI > 100). Sensitive groups include children, the elderly, people with asthma or heart "
-        "disease, and outdoor workers with prolonged exposure.",
+        "PM2.5 (fine particulate matter ≤2.5 µm) is regulated under the US EPA National Ambient Air "
+        "Quality Standards (NAAQS) and the WHO Global Air Quality Guidelines. The standards below are "
+        "used as benchmarks in this report. Note that short monitoring periods (weeks to months) cannot "
+        "be directly compared to annual standards without full-year data.",
         indent=12, font_size=9
     )
     draw_wrapped(
-        "WHO 24-Hour Guideline — 15 µg/m³: The World Health Organization's guideline is more than twice "
-        "as stringent as the EPA 24-hour standard, reflecting growing evidence linking chronic low-level "
-        "PM2.5 exposure to cardiovascular and respiratory disease even below the EPA threshold. "
-        "Researchers and health agencies increasingly use the WHO guideline when evaluating "
-        "long-term exposure burden.",
+        "35 µg/m³ — EPA Primary and Secondary 24-Hour PM2.5 Standard: The EPA's legally enforceable "
+        "short-term limit, applied as a 24-hour average. Both the primary standard (protecting public "
+        "health) and the secondary standard (protecting public welfare) are set at 35 µg/m³ and are "
+        "unchanged since 2006. Sustained 24-hour means above this level are associated with elevated "
+        "risk for sensitive groups: children, the elderly, and people with heart or lung disease.",
         indent=12, font_size=9
     )
     draw_wrapped(
-        "EPA Annual PM2.5 Standard — 9 µg/m³ (revised 2024): In February 2024, the EPA lowered the "
-        "annual NAAQS from 12 µg/m³ to 9 µg/m³, citing updated epidemiological evidence of health "
-        "effects at lower long-term concentrations. This standard is currently under administrative "
-        "review but remains legally in effect. Important: this is an annual arithmetic mean standard. "
-        "A short monitoring period (weeks or months) cannot be directly compared to it without "
-        "full-year data, but it provides useful context for long-term exposure interpretation.",
+        "15 µg/m³ — WHO 24-Hour Guideline and EPA Secondary Annual PM2.5 Standard: This value appears "
+        "in two independent standards. As the WHO 24-hour guideline (updated 2021), it reflects the "
+        "global health evidence threshold for daily PM2.5 exposure and is more stringent than the EPA "
+        "24-hour standard. Separately, 15 µg/m³ is also the EPA's welfare-based secondary annual "
+        "PM2.5 standard (averaging time: one calendar year), retained from the original 1997 NAAQS "
+        "to protect visibility and ecosystems. The two standards share a number but differ in "
+        "averaging time and purpose.",
+        indent=12, font_size=9
+    )
+    draw_wrapped(
+        "9 µg/m³ — EPA Primary Annual PM2.5 Standard (revised February 2024): The EPA lowered the "
+        "annual health-based NAAQS from 12 µg/m³ to 9 µg/m³, citing updated epidemiological evidence "
+        "linking long-term PM2.5 exposure to cardiovascular and respiratory disease at concentrations "
+        "below the previous limit. This is a 3-year arithmetic mean standard; a short monitoring "
+        "period cannot be directly compared to it without full-year data.",
+        indent=12, font_size=9
+    )
+    draw_wrapped(
+        "150 µg/m³ — EPA Primary and Secondary 24-Hour PM10 Standard: This standard covers inhalable "
+        "coarse particles (≤10 µm, including PM2.5). It is informational context only in this report; "
+        "all measurements here are PM2.5-specific. The 150 µg/m³ threshold applies to 24-hour average "
+        "PM10 and has remained unchanged.",
         indent=12, font_size=9
     )
     y -= 10
@@ -2380,7 +2662,7 @@ def build_report_pdf(
             "background exposure from acute episodic exposure."
         ),
         "Diurnal pattern": (
-            "PM2.5 readings are grouped by hour of the day (0–23 UTC) across the entire "
+            f"PM2.5 readings are grouped by hour of the day (0–23, {_hour_tz}) across the entire "
             "monitoring period. The bold center line is the mean concentration for each hour. "
             "The shaded gray band spans the 10th–90th percentile range — most readings on "
             "most days fall within this band.",
@@ -2437,23 +2719,37 @@ def build_report_pdf(
             "charts used in clinical laboratory quality management."
         ),
         "Channel A vs B": (
-            "Channel A (blue line) and Channel B (orange/red line) measurements are overlaid "
-            "on the same time axis. Both channels sample the same air parcel simultaneously "
-            "inside the sensor enclosure. The R² value shown is the squared Pearson correlation "
-            "between the two channels — a measure of how closely they track each other.",
-            "When the blue and orange lines lie directly on top of each other, the sensor is "
-            "in excellent health. When they diverge — one rising while the other stays flat — "
-            "something is wrong with one of the optical sensing elements. The Mean Absolute "
-            "Difference (MAD) shown in µg/m³ quantifies the typical gap between the lines. "
-            "R² > 0.85 is the research-grade acceptance threshold (JHU/MIT three-tier "
-            "validation framework). R² 0.70–0.85 is acceptable with documented caveats. "
-            "R² < 0.70 means the data should be treated as suspect until the cause is found.",
-            "Dual-channel agreement is the primary quality-control mechanism that sets "
-            "PurpleAir sensors apart from single-channel consumer devices. When both channels "
-            "agree, the instrument provides intrinsic replication — a significant "
-            "methodological strength for publication. This chart documents that agreement "
-            "(or its failure) for the record, which is a required element of rigorous "
-            "low-cost sensor data methodology sections."
+            "Each point is one paired reading: Channel A on the x-axis, Channel B on the y-axis. "
+            "Both channels sample the same air simultaneously inside the sensor. The dashed grey "
+            "line is the 1:1 line of perfect agreement; the red line is the ordinary-least-squares "
+            "fit (B = slope·A + intercept). R² is the squared correlation between the channels.",
+            "If the channels agree, points cluster tightly along the 1:1 line and the fitted slope "
+            "is near 1 with an intercept near 0. A slope materially different from 1 indicates a "
+            "proportional bias between channels; a non-zero intercept indicates a constant offset; "
+            "scatter away from the line indicates random disagreement. R² > 0.85 is the research-grade "
+            "acceptance threshold (JHU/MIT three-tier framework); 0.70–0.85 is acceptable with caveats; "
+            "below 0.70 the data should be treated as suspect until the cause is found.",
+            "An A-vs-B scatter with a 1:1 reference is the standard way to document inter-sensor "
+            "agreement for low-cost sensors, because it separates proportional bias (slope), constant "
+            "offset (intercept), and random error (scatter) — distinctions a single overlaid time-series "
+            "cannot reveal. Dual-channel agreement is the intrinsic replication that distinguishes "
+            "PurpleAir from single-channel devices and is a required element of a rigorous methods section."
+        ),
+        "Bland-Altman": (
+            "The Bland–Altman plot is the standard method-agreement diagnostic. For every paired "
+            "reading it plots the difference between channels (A − B, y-axis) against their mean "
+            "((A + B)/2, x-axis). The solid line is the mean bias; the dashed lines are the 95% "
+            "limits of agreement (mean bias ± 1.96 standard deviations of the differences).",
+            "A mean bias near zero means the channels agree on average. If the cloud of points "
+            "tilts or fans out as concentration increases, the disagreement is concentration-dependent "
+            "(proportional error) rather than a fixed offset — something a correlation/R² alone hides. "
+            "About 95% of differences should fall within the limits of agreement; points outside flag "
+            "readings where the two channels disagreed materially.",
+            "Bland–Altman is the accepted approach in metrology and epidemiology for comparing two "
+            "measurement methods, and is increasingly expected in low-cost-sensor literature because it "
+            "quantifies bias and its concentration-dependence directly — information a 1:1 scatter "
+            "supplements but does not fully replace. Together the scatter and Bland–Altman provide a "
+            "complete, publication-grade account of dual-channel agreement."
         ),
         "PM2.5 time series": (
             "Every valid PM2.5 reading from the monitoring period is plotted in the order it "
@@ -2469,34 +2765,8 @@ def build_report_pdf(
             "events for regulatory compliance reporting, and confirm that smoothed trend "
             "charts are not artifacts of the smoothing algorithm."
         ),
-        "AQI distribution": (
-            "All readings are sorted into the six EPA AQI health categories and the fraction "
-            "of total monitored time spent in each category is displayed as a colour-coded bar. "
-            "The bars are coloured to match the standard EPA AQI colour scheme.",
-            "A tall green bar means most of the monitoring period had 'Good' air quality "
-            "(AQI 0–50, PM2.5 below 12 µg/m³). Tall orange or red bars indicate a meaningful "
-            "fraction of hours had elevated or unhealthy conditions. All bars together sum "
-            "to 100% of monitoring time.",
-            "This chart converts the continuous PM2.5 record into a cumulative health-exposure "
-            "burden summary. In epidemiology, you can directly read off the fraction of "
-            "person-hours in each health category for exposure-response modelling. For "
-            "regulatory compliance reporting, it quantifies how frequently the location "
-            "exceeded defined thresholds during the monitoring window."
-        ),
-        "AQI indicator": (
-            "A colour-coded gauge showing the AQI calculated from the most recent PM2.5 "
-            "reading in this dataset, using the EPA standard piecewise linear breakpoint "
-            "formula. The number inside the gauge is the numeric AQI value.",
-            "The colour communicates the health concern level immediately: Green (0–50) = Good; "
-            "Yellow (51–100) = Moderate; Orange (101–150) = Unhealthy for Sensitive Groups; "
-            "Red (151–200) = Unhealthy for all; Purple (201–300) = Very Unhealthy; "
-            "Maroon (301–500) = Hazardous.",
-            "This is a snapshot indicator reflecting only the final reading in the dataset. "
-            "It should not be interpreted as a summary of the full monitoring period. "
-            "Use the AQI distribution chart on a nearby page for a time-integrated view."
-        ),
         "Hourly pattern": (
-            "Mean PM2.5 for each hour of the day (00:00–23:00 UTC) computed across all days "
+            f"Mean PM2.5 for each hour of the day (00:00–23:00, {_hour_tz}) computed across all days "
             "in the monitoring period, displayed as a bar chart. The data are numerically "
             "identical to the diurnal line chart but presented in bar form.",
             "The tallest bars identify your worst-pollution hours of the day. The shortest "
@@ -2524,7 +2794,7 @@ def build_report_pdf(
         ),
         "Weekly heatmap": (
             "A colour grid where rows represent the seven days of the week (Monday at top) "
-            "and columns represent hours of the day (0–23 UTC). Each cell is colour-coded "
+            f"and columns represent hours of the day (0–23, {_hour_tz}). Each cell is colour-coded "
             "by the mean PM2.5 for that specific day-of-week and hour combination across "
             "the full monitoring period. Blue = clean; yellow-orange = moderate; red = high.",
             "Dark red cells identify the day-hour combinations with the worst average air "
@@ -2539,10 +2809,10 @@ def build_report_pdf(
         ),
     }
 
-    # ── Separate figures: non-QC first, QC (Channel A vs B + Sensor Drift) last ─
-    _QC_TITLES = {"Sensor drift", "Channel A vs B"}
-    # Desired QC order: Channel A vs B, then Sensor Drift
-    _QC_ORDER  = ["Channel A vs B", "Sensor drift"]
+    # ── Separate figures: non-QC first, QC (agreement + drift) last ──────────
+    _QC_TITLES = {"Sensor drift", "Channel A vs B", "Bland-Altman"}
+    # Desired QC order: agreement scatter, Bland–Altman, then drift-over-time
+    _QC_ORDER  = ["Channel A vs B", "Bland-Altman", "Sensor drift"]
     non_qc_figs = [(t, p) for t, p in figures if t not in _QC_TITLES]
     qc_figs_map  = {t: p for t, p in figures if t in _QC_TITLES}
     qc_figs = [(t, qc_figs_map[t]) for t in _QC_ORDER if t in qc_figs_map]
@@ -2595,7 +2865,7 @@ def build_report_pdf(
         next_page()
         section_header("QC.", "Quality Control Section")
         draw_wrapped(
-            "The two charts in this section are technical instrument-health diagnostics. "
+            "The charts in this section are technical instrument-health diagnostics. "
             "They are intended for researchers, data reviewers, and sensor owners carrying "
             "out equipment maintenance. Non-technical readers can skip directly to the "
             "air quality charts in the previous section.",
@@ -2603,10 +2873,13 @@ def build_report_pdf(
         )
         draw_wrapped(
             "Each PurpleAir sensor contains two completely independent laser particle counters "
-            "(Channel A and Channel B) running in parallel. The 'Channel A vs B' chart overlays "
-            "both signals so you can see directly how closely they track each other. "
-            "The 'Sensor Drift' chart shows whether their difference is growing over time — "
-            "a warning sign of calibration decay. Together they answer: can I trust this data?",
+            "(Channel A and Channel B) running in parallel, providing intrinsic replication. This "
+            "section documents their agreement three ways: the 'Channel A vs B' scatter shows "
+            "correlation, proportional bias (slope) and offset (intercept) against a 1:1 line; the "
+            "'Bland–Altman' plot quantifies the mean bias and 95% limits of agreement and reveals "
+            "any concentration-dependent disagreement; and the 'Sensor Drift' chart shows whether "
+            "their difference grows over time — a warning sign of calibration decay. Together they "
+            "answer: can I trust this data?",
             indent=12, font_size=9
         )
         for title, path in qc_figs:
@@ -2641,187 +2914,948 @@ def build_public_report_pdf(
     anomalies: List[str],
     channel_agreement: Dict[str, Any],
     figures: List[Tuple[str, Path]],
+    exceedances: Optional[Dict[str, int]] = None,
+    metadata: Optional[Dict[str, str]] = None,
+    comparison: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
+    """Professional, plain-language PDF for residents and research participants.
+
+    If ``comparison`` is provided (a list of per-house dicts each with keys
+    ``label``, ``is_control`` and ``rolling_median``), a final House Comparison
+    page with 24h + 1h median overlay charts is appended.
+    """
+    import tempfile, os as _os
+    exceedances = exceedances or {}
+    metadata    = metadata or {}
+    comparison  = comparison or []
+
+    # Normalise timestamp columns to NAIVE LOCAL wall-clock. Timestamps stored in
+    # a DST timezone carry mixed offsets (e.g. -05:00 EST and -04:00 EDT), which
+    # makes pandas raise "Mixed timezones" on re-read. Stripping the offset keeps
+    # the local wall-clock (correct local hour/date) and is identical for UTC
+    # ("+00:00" removed → same hour). Applied to both daily and hourly.
+    def _naive_local(df):
+        if df is None or df.empty:
+            return df
+        tc = "timestamp" if "timestamp" in df.columns else df.columns[0]
+        s = df[tc].astype(str).str.replace(r'(?:[+-]\d{2}:?\d{2}|Z)\s*$', '', regex=True).str.strip()
+        df[tc] = pd.to_datetime(s, errors="coerce")
+        return df
+    daily  = _naive_local(daily.copy())
+    hourly = _naive_local(hourly.copy())
+
+    # ── Palette ───────────────────────────────────────────────────────────────
+    NAVY     = (0.08, 0.14, 0.28)
+    TEAL     = (0.10, 0.42, 0.50)
+    WHITE    = (1.00, 1.00, 1.00)
+    OFFWHITE = (0.97, 0.97, 0.96)
+    LGREY    = (0.92, 0.92, 0.92)
+    MGREY    = (0.50, 0.50, 0.50)
+    DGREY    = (0.16, 0.16, 0.16)
+
+    # ── Canvas ────────────────────────────────────────────────────────────────
     pdf = canvas.Canvas(str(report_path), pagesize=letter)
-    width, height = letter
-    y = height - 54
+    W, H = letter
+    LM, RM = 54, 54
+    BM = 68          # bottom safe zone
+    UW = W - LM - RM  # 504 pt usable width
+    page_num = [1]
+    y = [H - 54]
 
-    def draw_line(text: str, indent: int = 0, font_size: int = 10, bold: bool = False) -> None:
-        nonlocal y
-        if y < 72:
-            pdf.showPage()
-            y = height - 54
-        font_name = "Helvetica-Bold" if bold else "Helvetica"
-        pdf.setFont(font_name, font_size)
-        pdf.drawString(54 + indent, y, text)
-        y -= font_size + 4
+    # ── Helpers ───────────────────────────────────────────────────────────────
+    def _f(rgb): pdf.setFillColorRGB(*rgb)
+    def _s(rgb): pdf.setStrokeColorRGB(*rgb)
 
-    def draw_wrapped(text: str, indent: int = 0, font_size: int = 9) -> None:
-        nonlocal y
-        pdf.setFont("Helvetica", font_size)
-        for wrapped in textwrap.wrap(text, width=95):
-            if y < 72:
-                pdf.showPage()
-                y = height - 54
-            pdf.drawString(54 + indent, y, wrapped)
-            y -= font_size + 2
-        y -= 4
+    def _stamp():
+        pdf.setFont("Helvetica", 7); _f(MGREY)
+        dev_id = metadata.get("device_id") or metadata.get("label") or ""
+        ft = "Air Quality Community Report  ·  PurpleAir Local Analyzer"
+        if dev_id: ft += f"  ·  Device {dev_id}"
+        pdf.drawString(LM, 28, ft)
+        pdf.drawRightString(W - RM, 28, f"Page {page_num[0]}")
+        _s((0.78, 0.78, 0.78)); pdf.setLineWidth(0.4)
+        pdf.line(LM, 38, W - RM, 38)
+        _f(DGREY); _s((0, 0, 0)); pdf.setLineWidth(0.5)
 
-    # Title
-    pdf.setFont("Helvetica-Bold", 18)
-    pdf.drawString(54, y, "Air Quality Community Report")
-    y -= 10
-    pdf.setFont("Helvetica", 10)
-    pdf.drawString(54, y, "Easy-to-understand summary of your local air quality data")
-    y -= 28
+    def _newpage():
+        _stamp(); pdf.showPage(); page_num[0] += 1; y[0] = H - 66
 
-    # Overview
-    draw_line("What's the Air Quality Like?", font_size=14, bold=True)
-    y -= 6
-    draw_line(f"Period: {summary['date_range']['start']} to {summary['date_range']['end']}", indent=12)
-    draw_line(f"Average Air Quality: AQI {summary['aqi_average']} ({summary['aqi_category']})", indent=12)
-    draw_line(f"Average PM2.5 pollution: {summary['pm25_average']} µg/m³", indent=12)
-    y -= 12
+    def _need(h):
+        if y[0] < BM + h: _newpage()
 
-    # What do these numbers mean?
-    draw_line("Understanding the Numbers", font_size=14, bold=True)
-    y -= 6
-    draw_wrapped(
-        "AQI (Air Quality Index): A number from 0–500 that describes air quality. Higher numbers mean worse air.",
-        indent=12
-    )
-    draw_wrapped(
-        "PM2.5: Tiny pollution particles you breathe. Measured in micrograms per cubic meter (µg/m³).",
-        indent=12
-    )
-    draw_wrapped(
-        "EPA Standard: 35 µg/m³ average over 24 hours. Above this = unhealthy for sensitive people.",
-        indent=12
-    )
-    draw_wrapped(
-        "WHO Goal: 15 µg/m³. Even stricter, for better long-term health protection.",
-        indent=12
-    )
-    y -= 12
+    def _at(text, x, yy, font="Helvetica", size=9, color=DGREY):
+        _f(color); pdf.setFont(font, size); pdf.drawString(x, yy, text)
 
-    # Data quality
-    draw_line("How Good Is This Data?", font_size=14, bold=True)
-    y -= 6
-    draw_line(f"Data Quality Score: {summary['quality_score']}%", indent=12)
-    if summary['quality_score'] >= 90:
-        draw_wrapped("✓ Excellent: This data is reliable and ready for important decisions.", indent=12, font_size=9)
-    elif summary['quality_score'] >= 70:
-        draw_wrapped("✓ Good: This data is trustworthy for general use.", indent=12, font_size=9)
-    elif summary['quality_score'] >= 50:
-        draw_wrapped("⚠ Fair: Use with caution. Some measurements may be missing or unreliable.", indent=12, font_size=9)
+    def _wrap(text, x=LM, avail=UW - 10, font="Helvetica", size=9.5,
+              color=DGREY, lh=14, after=10):
+        """Left-aligned word-wrap. Checks space before each line — never overlaps."""
+        _f(color); pdf.setFont(font, size)
+        sw = pdf.stringWidth(" ", font, size)
+        cur, cw = [], 0.0
+        for w in text.split():
+            ww = pdf.stringWidth(w, font, size)
+            if cur and cw + sw + ww > avail:
+                _need(lh + 2)
+                pdf.setFont(font, size); _f(color)
+                pdf.drawString(x, y[0], " ".join(cur))
+                y[0] -= lh
+                cur, cw = [w], ww
+            else:
+                if cur: cw += sw
+                cur.append(w); cw += ww
+        if cur:
+            _need(lh + 2)
+            pdf.setFont(font, size); _f(color)
+            pdf.drawString(x, y[0], " ".join(cur))
+            y[0] -= lh
+        y[0] -= after
+        _f(DGREY)
+
+    def _section(title, sub=""):
+        _need(52)
+        y[0] -= 14
+        _f(TEAL); pdf.rect(LM, y[0] - 8, UW, 32, fill=1, stroke=0)
+        _at(title, LM + 12, y[0] + 10, "Helvetica-Bold", 12, WHITE)
+        if sub:
+            pdf.setFont("Helvetica", 8.5); _f((0.80, 0.93, 0.97))
+            pdf.drawRightString(W - RM - 8, y[0] + 10, sub)
+        y[0] -= 42
+
+    def _embed(path, h=215, cap=""):
+        """Embed an existing figure. Always checks full height first."""
+        need = h + (16 if cap else 4)
+        _need(need)
+        pdf.drawImage(ImageReader(str(path)), LM, y[0] - h, UW, h,
+                      preserveAspectRatio=True, mask="auto")
+        y[0] -= h + 6
+        if cap:
+            _at(cap, LM, y[0], "Helvetica", 7.5, MGREY); y[0] -= 12
+        y[0] -= 6
+
+    # Look up existing figures by title (lower-case key)
+    fig_map = {t.lower(): p for t, p in figures}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PAGE 1 — OVERVIEW DASHBOARD
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── Full-width header block ───────────────────────────────────────────────
+    # Draw order: navy bg → text → darker sub-bar → period text (so text is on top)
+    dev_id  = metadata.get("device_id") or metadata.get("label") or ""
+    dev_loc = metadata.get("location") or metadata.get("sensor_location") or ""
+    s_start = (summary.get("date_range", {}).get("start") or "")[:10]
+    s_end   = (summary.get("date_range", {}).get("end")   or "")[:10]
+    parts   = [f"Period: {s_start} – {s_end}"]
+    if dev_id:  parts.append(f"Device ID: {dev_id}")
+    if dev_loc: parts.append(f"Location: {dev_loc}")
+
+    HDR_H   = 112   # total header height in points
+    SUBBAR  = 36    # height of the darker device-info strip at the bottom
+    # 1. Full navy background
+    _f(NAVY); pdf.rect(0, H - HDR_H, W, HDR_H, fill=1, stroke=0)
+    # 2. Title drawn on the navy (BEFORE the sub-bar so text stays on top)
+    _at("Air Quality Community Report", LM, H - 46, "Helvetica-Bold", 22, WHITE)
+    # 3. Darker sub-bar — drawn AFTER title so it sits below it
+    _f((0.05, 0.10, 0.22)); pdf.rect(0, H - HDR_H, W, SUBBAR, fill=1, stroke=0)
+    # 4. Period/device text inside the sub-bar
+    _at("  |  ".join(parts), LM, H - HDR_H + 12, "Helvetica", 9.5, (0.76, 0.88, 0.93))
+
+    y[0] = H - HDR_H - 12  # content starts below the header
+
+    # ── Compute personalized stats (used throughout page 1 and tips page) ─────
+    pm_corr = summary.get("pm25_average_epa_corrected") or summary.get("pm25_average", "0")
+    pm_f    = float(pm_corr) if str(pm_corr).replace(".", "", 1).isdigit() else 0.0
+    _pm25_max_val = float(summary.get("pm25_max", 0))
+
+    # WHO/EPA hourly exceedance stats
+    _total_hours = summary.get("total_readings", 0) * 2 / 60
+    who_h   = exceedances.get("who_15", 0)
+    epa_h   = exceedances.get("epa_35", 0)
+    _who_pct = round(100 * who_h / _total_hours, 1) if _total_hours > 0 else 0.0
+    _within_who_pct = round(100 - _who_pct, 1)
+
+    # Days with most exceedances
+    _ts_h_p = "timestamp" if "timestamp" in hourly.columns else hourly.columns[0]
+    _hp      = hourly.copy()
+    _hp["_d"] = pd.to_datetime(_hp[_ts_h_p], errors="coerce").dt.date
+    _pm_h_col = "pm25_corrected" if "pm25_corrected" in _hp.columns else "pm25"
+    _hp["_ab"] = _hp[_pm_h_col].apply(lambda v: 1 if pd.notna(v) and float(v) > 15 else 0)
+    _exc_days  = _hp.groupby("_d")["_ab"].sum()
+    _top_exc   = _exc_days[_exc_days > 0].nlargest(2)
+
+    # Daily PM2.5 stats for verdict strip
+    _ts_d_p = "timestamp" if "timestamp" in daily.columns else daily.columns[0]
+    _dp = daily.copy()
+    _dp["_d"] = pd.to_datetime(_dp[_ts_d_p], errors="coerce").dt.date
+    _dp = _dp.dropna(subset=["_d"])
+    _pm_d_col = "pm25_corrected" if "pm25_corrected" in _dp.columns else "pm25"
+    _dp["_pm_val"] = _dp[_pm_d_col].apply(lambda v: max(0.0, float(v)) if pd.notna(v) else 0.0)
+    _total_days = max(1, len(_dp))
+    _within_who_days = int((_dp["_pm_val"] <= 15).sum())
+    _within_who_days_pct = round(100 * _within_who_days / _total_days)
+
+    def _short_date(d):
+        try:
+            dt = pd.Timestamp(str(d))
+            return f"{dt.strftime('%b')} {dt.day}"   # e.g. "May 18"
+        except Exception:
+            return str(d)
+
+    _top_dates_str = ""
+    if len(_top_exc) >= 2:
+        _top_dates_str = " and ".join([_short_date(d) for d in list(_top_exc.index)[:2]])
+    elif len(_top_exc) == 1:
+        _top_dates_str = _short_date(list(_top_exc.index)[0])
+
+    # ── At a Glance — plain-language verdict + interpretation ─────────────────
+    # This is an executive summary (the "so what"), deliberately NOT a restatement
+    # of the numeric Health Guidelines box below it. It translates the measured
+    # levels into a clear takeaway and activity guidance for residents.
+    if pm_f <= 15 and who_h == 0:
+        _glance_verdict = "Air quality at this location was GOOD throughout the monitoring period."
+        _glance_interp = (
+            "Fine-particle pollution (PM2.5) stayed within the World Health Organization's "
+            "health-protective 24-hour guideline at all times. Outdoor activity was suitable "
+            "for everyone, including children, older adults, and people with heart or lung conditions."
+        )
+    elif pm_f <= 15:
+        _glance_verdict = "Air quality at this location was GENERALLY GOOD, with occasional short-lived peaks."
+        _glance_interp = (
+            f"Average PM2.5 stayed within the WHO 24-hour guideline, though it rose above it for "
+            f"about {_who_pct}% of hours. Most people were unaffected; sensitive groups may wish to "
+            "limit prolonged outdoor exertion during the brief higher-pollution periods."
+        )
+    elif pm_f <= 35:
+        _glance_verdict = "Air quality at this location was MODERATE."
+        _glance_interp = (
+            "Average PM2.5 was above the stricter WHO guideline but within the U.S. EPA 24-hour "
+            "standard. People with respiratory or heart conditions should watch conditions and "
+            "limit prolonged outdoor exertion on higher-pollution days."
+        )
     else:
-        draw_wrapped("✗ Poor: Significant data quality issues. Not suitable for critical decisions.", indent=12, font_size=9)
-    y -= 12
+        _glance_verdict = "Air quality at this location was a CONCERN during this period."
+        _glance_interp = (
+            "Average PM2.5 exceeded the U.S. EPA 24-hour standard. Reducing outdoor exposure on "
+            "high-pollution days is advisable, especially for children, older adults, and people "
+            "with heart or lung conditions."
+        )
 
-    # Channel agreement
-    if channel_agreement and float(channel_agreement.get('r2', 0)) > 0:
-        draw_line("Sensor Reliability Check", font_size=14, bold=True)
-        y -= 6
-        draw_line(f"Two sensors comparison: {channel_agreement.get('agreement_pct', 'N/A')}% consistent", indent=12)
-        if float(channel_agreement.get('r2', 0)) > 0.85:
-            draw_wrapped("✓ Both sensors agree very well - measurements are trustworthy.", indent=12, font_size=9)
-        else:
-            draw_wrapped("⚠ Sensors show some disagreement - take note before major decisions.", indent=12, font_size=9)
-        y -= 12
+    _gv_lines = textwrap.wrap(_glance_verdict, width=78)
+    _gi_lines = textwrap.wrap(_glance_interp, width=96)
+    KF_H = 22 + len(_gv_lines) * 13 + 4 + len(_gi_lines) * 12 + 12
+    _need(KF_H + 8)
+    y[0] -= 8
+    _f(OFFWHITE); _s((0.80, 0.80, 0.80)); pdf.setLineWidth(0.7)
+    pdf.roundRect(LM, y[0] - KF_H, UW, KF_H, 6, fill=1, stroke=1)
+    _f(TEAL); pdf.rect(LM, y[0] - KF_H, 5, KF_H, fill=1, stroke=0)
+    _at("At a Glance", LM + 14, y[0] - 16, "Helvetica-Bold", 11, NAVY)
+    _s((0.80, 0.80, 0.80)); pdf.setLineWidth(0.4)
+    pdf.line(LM + 12, y[0] - 24, LM + UW - 10, y[0] - 24)
+    _gy = y[0] - 38
+    pdf.setFont("Helvetica-Bold", 9.5); _f(NAVY)
+    for _gl in _gv_lines:
+        pdf.drawString(LM + 14, _gy, _gl); _gy -= 13
+    _gy -= 4
+    pdf.setFont("Helvetica", 8.5); _f(DGREY)
+    for _gl in _gi_lines:
+        pdf.drawString(LM + 14, _gy, _gl); _gy -= 12
+    y[0] -= KF_H + 8
 
-    # Daily Summary
-    draw_line("Day-by-Day Summary", font_size=14, bold=True)
-    y -= 6
-    if not daily.empty:
-        daily_view = daily.copy().head(30)
-        daily_count = 0
-        for _, row in daily_view.iterrows():
-            if daily_count >= 10:  # Show first 10 days
-                draw_line(f"(+ {len(daily) - 10} more days — see full export for complete data)", indent=12, font_size=9)
-                break
-            date_label = row.get("timestamp")
-            pm_val = row.get("pm25")
-            aqi_val = row.get("aqi")
-            draw_line(
-                f"{date_label}: PM2.5 {round(float(pm_val), 1) if pd.notna(pm_val) else 'N/A'} "
-                f"µg/m³, AQI {int(aqi_val) if pd.notna(aqi_val) else 'N/A'}",
-                indent=12,
-                font_size=9
+    # ── Health Guidelines box ─────────────────────────────────────────────────
+    y[0] -= 8
+    BOX_H = 110
+    _need(BOX_H + 6)
+    _f(OFFWHITE); _s((0.80, 0.80, 0.80)); pdf.setLineWidth(0.7)
+    pdf.roundRect(LM, y[0] - BOX_H, UW, BOX_H, 6, fill=1, stroke=1)
+    _at("Health Guidelines", LM + 12, y[0] - 16, "Helvetica-Bold", 10.5, NAVY)
+    _s((0.80, 0.80, 0.80)); pdf.setLineWidth(0.5)
+    pdf.line(LM + 10, y[0] - 26, LM + UW - 10, y[0] - 26)
+
+    # Contextual detail lines — each must fit ~97 chars at 8pt; dates formatted as "May 18"
+    if _pm25_max_val < 35:
+        _max_ctx = f"Peak: {_pm25_max_val:.1f} ug/m3 (below the EPA 24-hour limit of 35 ug/m3)."
+    else:
+        _max_ctx = f"Peak: {_pm25_max_val:.1f} ug/m3 (exceeded the EPA 24-hour limit of 35 ug/m3)."
+
+    if who_h == 0:
+        _who_det = "No individual hours exceeded the WHO limit during the entire monitoring period."
+    else:
+        _date_part = f", mainly on {_top_dates_str}" if _top_dates_str else ""
+        _who_det = f"{who_h} hrs = {_who_pct}% of monitoring time{_date_part}. Context: see daily chart."
+
+    std_rows = [
+        (pm_f <= 15,
+         f"Average PM2.5: {pm_corr} ug/m3  (WHO guideline: 15 ug/m3)",
+         (f"Below the WHO guideline. {_max_ctx}" if pm_f <= 15
+          else f"Above the WHO 24-hour guideline of 15 ug/m3. {_max_ctx}")),
+        (who_h == 0,
+         f"Hours above WHO guideline (15 ug/m3): {who_h}",
+         _who_det),
+        (epa_h == 0,
+         f"Hours above EPA standard (35 ug/m3): {epa_h}",
+         ("No hours reached the EPA 24-hour threshold during the entire monitoring period."
+          if epa_h == 0
+          else f"{epa_h} hours exceeded the EPA 24-hour standard of 35 ug/m3.")),
+    ]
+    ry = y[0] - 42
+    for good, bold_t, detail_t in std_rows:
+        dot_c = (0.00, 0.48, 0.20) if good else (0.62, 0.06, 0.06)
+        _f(dot_c); pdf.circle(LM + 18, ry + 4, 5.5, fill=1, stroke=0)
+        _at(bold_t,   LM + 32, ry + 1,  "Helvetica-Bold", 8.5, NAVY)
+        _at(detail_t, LM + 32, ry - 12, "Helvetica",      8,   MGREY)
+        ry -= 28
+    y[0] -= BOX_H + 10
+
+    # ── Regulatory Standards table (Page 1) ──────────────────────────────────
+    _need(36)
+    y[0] -= 4
+    _at("Regulatory Standards for PM2.5 — All Major Limits at a Glance",
+        LM, y[0], "Helvetica-Bold", 9.5, NAVY)
+    y[0] -= 16
+
+    # 4-column table — ROW_STD=24 so all 6 rows + footer stay on page 1
+    # Columns: Agency+Limit(124) | Period(60) | Description(196) | Used here(124) = 504=UW
+    SC = [LM, LM + 124, LM + 184, LM + 380]
+    SH = ["Agency & Standard", "Avg Period", "What It Means", "Used in This Report?"]
+    ROW_STD = 24
+
+    _need(ROW_STD + 4)
+    _f(NAVY); pdf.rect(LM, y[0] - 18, UW, 18, fill=1, stroke=0)
+    pdf.setFont("Helvetica-Bold", 7.5); _f(WHITE)
+    for cx, sh in zip(SC, SH):
+        pdf.drawString(cx + 4, y[0] - 12, sh)
+    y[0] -= 18
+
+    STD_DATA = [
+        ("WHO",  "15 µg/m³",  "24-hour",
+         "Strictest global 24-hour guideline.",
+         "YES — used in this report", True),
+        ("EPA",  "35 µg/m³",  "24-hour",
+         "US enforceable 24-hour standard (NAAQS).",
+         "YES — used in this report", True),
+        ("EPA",  "9 µg/m³",   "Annual mean",
+         "US primary standard for public health.",
+         "Context — needs 12+ months data", False),
+        ("EPA",  "15 µg/m³",  "Annual mean",
+         "US secondary standard for public welfare.",
+         "Context — needs 12+ months data", False),
+        ("WHO",  "5 µg/m³",   "Annual mean",
+         "WHO long-term annual guideline.",
+         "Context — needs 12+ months data", False),
+        ("EPA",  "150 µg/m³", "24-hour",
+         "Coarse-particle (PM10) standard — not PM2.5.",
+         "No — PM10 standard only", False),
+    ]
+    DESC_W = SC[3] - SC[2] - 8
+    APPL_W = LM + UW - SC[3] - 6
+
+    for idx, (agency, lim, period, desc, appl, is_rel) in enumerate(STD_DATA):
+        _need(ROW_STD + 2)
+        _f(LGREY if idx % 2 == 0 else WHITE)
+        pdf.rect(LM, y[0] - ROW_STD, UW, ROW_STD, fill=1, stroke=0)
+        row_top = y[0]
+        # Agency badge + limit value
+        badge_c = TEAL if agency == "EPA" else (0.05, 0.36, 0.54)
+        _f(badge_c); pdf.roundRect(SC[0] + 3, row_top - 20, 32, 12, 2, fill=1, stroke=0)
+        pdf.setFont("Helvetica-Bold", 7); _f(WHITE)
+        pdf.drawCentredString(SC[0] + 19, row_top - 14, agency)
+        pdf.setFont("Helvetica-Bold", 8.5); _f(NAVY)
+        pdf.drawString(SC[0] + 40, row_top - 13, lim)
+        # Period
+        pdf.setFont("Helvetica", 7.5); _f(DGREY)
+        pdf.drawString(SC[1] + 4, row_top - 13, period)
+        # Description — single line (fits DESC_W at 7pt)
+        pdf.setFont("Helvetica", 7); _f(DGREY)
+        desc_lines = textwrap.wrap(desc, width=max(20, int(DESC_W / 4.0)))
+        pdf.drawString(SC[2] + 4, row_top - 13, desc_lines[0] if desc_lines else desc)
+        # Applicable
+        appl_c = (0.00, 0.42, 0.18) if is_rel else MGREY
+        pdf.setFont("Helvetica-Bold" if is_rel else "Helvetica", 7.5); _f(appl_c)
+        pdf.drawString(SC[3] + 4, row_top - 13, appl)
+        y[0] -= ROW_STD
+
+    # Footer note bar (fits because y ≈ 126 > BM+22=90 now)
+    y[0] -= 4
+    _f(LGREY); pdf.rect(LM, y[0] - 16, UW, 16, fill=1, stroke=0)
+    pdf.setFont("Helvetica", 7); _f(MGREY)
+    pdf.drawString(LM + 6, y[0] - 11,
+        "Only 24-hour standards (WHO 15 µg/m³, EPA 35 µg/m³) are directly comparable to this monitoring period. "
+        "Annual standards require ≥12 months of continuous data.")
+    y[0] -= 20
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PAGE 2 — PM2.5 TREND OVER TIME  (rolling medians)
+    # ─────────────────────────────────────────────────────────────────────────
+    _newpage()
+    _section("PM2.5 Levels Over Time — Trend & Variability")
+    y[0] -= 4
+
+    _wrap(
+        "This chart shows how PM2.5 changed day by day during the monitoring period. "
+        "Two lines are shown: a fine line for each hourly reading, and a bolder smoothed "
+        "line that shows the overall daily trend. Watch the trend line: when it rises, "
+        "air quality is getting worse; when it falls, air quality is improving.",
+        lh=13, after=10
+    )
+
+    rolling_path = fig_map.get("rolling medians")
+    if rolling_path and rolling_path.exists():
+        _embed(rolling_path, h=215,
+               cap="Chart: PM2.5 over time. Fine line = each hourly reading. Bold line = smoothed 24-hour trend.")
+    y[0] -= 6
+
+    _wrap(
+        "Short spikes in the hourly line are normal — they often come from a passing vehicle, "
+        "cooking, or wind stirring up dust, and typically clear within minutes. What matters "
+        "for health is the sustained trend: if the bold line stays elevated for hours or days, "
+        "that signals a real pollution episode worth paying attention to — such as smoke from "
+        "fires, stagnant air trapping pollutants, or industrial emissions. The red reference "
+        "line (if shown) marks the WHO 24-hour guideline of 15 µg/m3.",
+        lh=13, after=8
+    )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PAGE 3 — DAILY PM2.5 DISTRIBUTION + TABLE
+    # ─────────────────────────────────────────────────────────────────────────
+    _newpage()
+    _section("Daily PM2.5 Results", f"{s_start} – {s_end}")
+    y[0] -= 4
+
+    _wrap(
+        "The box plot below summarises the distribution of daily PM2.5 concentrations across "
+        "the monitoring period. Each box spans the interquartile range (25th–75th percentile) "
+        "of all hourly readings for that day; the horizontal line inside the box is the daily "
+        "median. Whiskers extend to the 10th and 90th percentile; individual dots beyond the "
+        "whiskers are statistical outliers. The red dashed line marks the WHO 24-hour guideline "
+        "(15 µg/m³); the orange dashed line marks the EPA 24-hour standard (35 µg/m³).",
+        lh=13, after=10
+    )
+
+    # Prep daily data
+    ts_col   = "timestamp" if "timestamp" in daily.columns else daily.columns[0]
+    d_work   = daily.copy()
+    d_work["_date"] = pd.to_datetime(d_work[ts_col], errors="coerce").dt.date
+    d_work   = d_work.dropna(subset=["_date"]).sort_values("_date")
+    pm_col_d = "pm25_corrected" if "pm25_corrected" in d_work.columns else "pm25"
+    d_work["_pm"] = (d_work[pm_col_d]
+                     .fillna(d_work["pm25"] if "pm25" in d_work.columns else 0)
+                     .apply(lambda v: max(0.0, float(v)) if pd.notna(v) else 0.0))
+
+    # Daily PM2.5 box plot using hourly data grouped by date
+    _tmp1 = None
+    try:
+        _ts_bx   = "timestamp" if "timestamp" in hourly.columns else hourly.columns[0]
+        _h_bx    = hourly.copy()
+        _h_bx["_date"] = pd.to_datetime(_h_bx[_ts_bx], errors="coerce").dt.date
+        _pm_bx   = "pm25_corrected" if "pm25_corrected" in _h_bx.columns else "pm25"
+        _h_bx["_pm"] = _h_bx[_pm_bx].apply(lambda v: max(0.0, float(v)) if pd.notna(v) else float("nan"))
+        _grouped = _h_bx.dropna(subset=["_pm"]).groupby("_date")["_pm"].apply(list)
+        _grouped = _grouped[_grouped.apply(len) > 0]
+
+        if len(_grouped) > 0:
+            _dates  = sorted(_grouped.index)
+            _data   = [_grouped[d] for d in _dates]
+            _lbls   = [str(d)[5:] for d in _dates]
+
+            fig, ax = plt.subplots(figsize=(9.4, 3.4))
+            bp = ax.boxplot(
+                _data, positions=range(len(_data)),
+                widths=0.55, patch_artist=True, showfliers=True,
+                flierprops=dict(marker=".", markersize=3, color="#888888", alpha=0.6),
+                medianprops=dict(color="#1a3a6b", linewidth=2.0),
+                boxprops=dict(facecolor="#cce4f0", linewidth=0.8),
+                whiskerprops=dict(linewidth=0.8, linestyle="--"),
+                capprops=dict(linewidth=0.8),
+                whis=(10, 90),
             )
-            daily_count += 1
+            ax.axhline(15, color="#c0392b", lw=1.2, ls="--", alpha=0.85, label="WHO guideline 15 µg/m³")
+            ax.axhline(35, color="#e67e22", lw=1.0, ls="--", alpha=0.75, label="EPA standard 35 µg/m³")
+            ax.set_xticks(range(len(_lbls)))
+            ax.set_xticklabels(_lbls, rotation=40, ha="right", fontsize=7.0)
+            ax.set_ylabel("PM2.5 (µg/m³)", fontsize=9)
+            ax.set_title("Daily PM2.5 Distribution — Box Plot (Median, IQR, 10th–90th pct, Outliers)",
+                         fontsize=10.5, fontweight="bold")
+            ax.legend(fontsize=7.5, loc="upper right", framealpha=0.88)
+            ax.grid(axis="y", alpha=0.20)
+            ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+            fig.tight_layout(pad=1.1)
+            _fd, _tmp1 = tempfile.mkstemp(suffix=".png")
+            _os.close(_fd); fig.savefig(_tmp1, dpi=155, bbox_inches="tight"); plt.close(fig)
+            IMG_H = 215
+            _need(IMG_H + 14)
+            pdf.drawImage(ImageReader(_tmp1), LM, y[0] - IMG_H, UW, IMG_H)
+            y[0] -= IMG_H + 12
+    except Exception:
+        pass
+    finally:
+        if _tmp1 and _os.path.exists(_tmp1):
+            try: _os.unlink(_tmp1)
+            except Exception: pass
+
+    # Daily summary table (3 columns: Date | PM2.5 | vs. WHO)
+    COL_X   = [LM, LM + 140, LM + 320]
+    HDRS    = ["Date", "PM2.5 (µg/m³)", "vs. WHO (15 µg/m³)"]
+    ROW_H   = 13
+    HDR_H   = 22
+
+    def _draw_tbl_header():
+        _need(HDR_H + ROW_H)
+        _f(NAVY); pdf.rect(LM, y[0] - HDR_H + 2, UW, HDR_H, fill=1, stroke=0)
+        pdf.setFont("Helvetica-Bold", 8.5); _f(WHITE)
+        for cx, hd in zip(COL_X, HDRS):
+            pdf.drawString(cx + 4, y[0] - 13, hd)
+        y[0] -= HDR_H
+
+    _draw_tbl_header()
+    for idx, (_, row) in enumerate(d_work.iterrows()):
+        if y[0] < BM + ROW_H + 4:
+            _newpage()
+            _draw_tbl_header()
+        pm_v = row["_pm"]
+        # Zebra row
+        _f(LGREY if idx % 2 == 0 else WHITE)
+        pdf.rect(LM, y[0] - ROW_H + 1, UW, ROW_H, fill=1, stroke=0)
+        # Data cells
+        pdf.setFont("Helvetica", 8.5); _f(DGREY)
+        pdf.drawString(COL_X[0] + 4, y[0] - 9, str(row["_date"]))
+        pdf.drawString(COL_X[1] + 4, y[0] - 9, f"{pm_v:.2f}")
+        who_c = (0.60, 0.06, 0.06) if pm_v > 15 else (0.00, 0.44, 0.18)
+        _f(who_c); pdf.drawString(COL_X[2] + 4, y[0] - 9,
+                                   "Above WHO guideline" if pm_v > 15 else "Within WHO guideline")
+        y[0] -= ROW_H
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PAGE 4 — HOUR-BY-HOUR PATTERN + HEALTH GUIDE
+    # ─────────────────────────────────────────────────────────────────────────
+    _newpage()
+    _section("24-Hour Air Quality Pattern — When Is the Air Cleanest?")
+    y[0] -= 4
+
+    _wrap(
+        "The polar (clock-face) chart below shows the average PM2.5 concentration for each hour "
+        "of the day across the entire monitoring period. Midnight (00:00) is at the top; hours "
+        "advance clockwise. The further the shape extends outward at a given hour, the higher "
+        "the pollution. The dashed reference rings mark the WHO guideline (15 µg/m³) and the "
+        "EPA 24-hour standard (35 µg/m³).",
+        lh=13, after=8
+    )
+
+    # ── Embed the existing research-pipeline polar chart (best quality) ───────
+    radar_path = fig_map.get("pm2.5 temporal radar")
+
+    # Derive cleanest / dirtiest hour early so it can appear right after chart
+    _tz_lbl  = summary.get("tz_label", "UTC") or "UTC"
+    _is_utc  = _tz_lbl.upper() == "UTC"
+    ts_h2    = "timestamp" if "timestamp" in hourly.columns else hourly.columns[0]
+    h_wk2    = hourly.copy()
+    h_wk2["_hr"] = pd.to_datetime(h_wk2[ts_h2], errors="coerce").dt.hour
+    pm_hc2   = "pm25_corrected" if "pm25_corrected" in h_wk2.columns else "pm25"
+    diurnal2 = h_wk2.groupby("_hr")[pm_hc2].mean().dropna()
+    _tz_short = _tz_lbl.split('/')[-1].replace('_', ' ')
+    def _hfmt_tz(h):
+        if _is_utc:
+            return f"{h:02d}:00 UTC"
+        return f"{h % 12 or 12}:00 {'AM' if h < 12 else 'PM'} ({_tz_short} time)"
+
+    if radar_path and Path(radar_path).exists():
+        # Reduced from 460 → 380 so caption + cleanest-hour text + tz note all
+        # fit on the same page without triggering _need() page breaks.
+        RADAR_H = 380
+        _need(RADAR_H + 20)
+        radar_x = LM + (UW - RADAR_H) / 2
+        pdf.drawImage(ImageReader(str(radar_path)), radar_x, y[0] - RADAR_H,
+                      RADAR_H, RADAR_H, preserveAspectRatio=True, mask="auto")
+        y[0] -= RADAR_H + 6
+
+        # Caption — wrapped so it never escapes the right margin
+        _cap_tz = "UTC" if _is_utc else f"{_tz_lbl.split('/')[-1].replace('_', ' ')} local time"
+        _cap_text = (
+            "Chart: Average PM2.5 by hour of day plotted on a 24-hour clock face "
+            f"({_cap_tz}, hour labels 00-23). Distance from centre = PM2.5 concentration. "
+            "Dashed rings = WHO 15 ug/m3 and EPA 35 ug/m3."
+        )
+        _cap_fs  = 7.5
+        _cap_cpl = max(40, int((UW - 4) / (_cap_fs * 0.54)))
+        _cap_lh  = 10
+        _f(MGREY); pdf.setFont("Helvetica", _cap_fs)
+        _cap_ly  = y[0]
+        for _cl in textwrap.wrap(_cap_text, width=_cap_cpl):
+            pdf.drawString(LM, _cap_ly, _cl)
+            _cap_ly -= _cap_lh
+        y[0] = _cap_ly - 4
     else:
-        draw_line("No daily summary available.", indent=12)
-    y -= 12
+        # Fallback: standard diurnal line chart from research pipeline
+        diurnal_path = fig_map.get("diurnal pattern")
+        if diurnal_path and Path(diurnal_path).exists():
+            _embed(diurnal_path, h=210,
+                   cap="Chart: Average PM2.5 by hour of day — shaded band = 10th-90th percentile range.")
 
-    # Patterns
-    draw_line("Air Quality Patterns", font_size=14, bold=True)
-    y -= 6
-    draw_wrapped(
-        "Hour-by-hour: Air quality typically changes throughout the day. Morning and evening rush hours often show "
-        "higher pollution due to traffic. Late night often has cleaner air.",
-        indent=12, font_size=9
-    )
-    draw_wrapped(
-        "Day-to-day: Some days have cleaner air than others. Weather, wind direction, and nearby activities all matter.",
-        indent=12, font_size=9
-    )
-    y -= 12
+    # Cleanest / dirtiest hour callout — drawn BEFORE timezone box so it
+    # stays on the same page as the chart.
+    if len(diurnal2) >= 4:
+        c_hr = int(diurnal2.idxmin()); d_hr = int(diurnal2.idxmax())
+        _wrap(
+            f"Cleanest typical hour: {_hfmt_tz(c_hr)} (avg {diurnal2[c_hr]:.1f} ug/m3). "
+            f"Highest average: {_hfmt_tz(d_hr)} ({diurnal2[d_hr]:.1f} ug/m3). "
+            "For outdoor walks and exercise, choose the hours where the chart shape stays "
+            "closest to the centre.",
+            lh=13, after=10
+        )
 
-    # Anomalies
-    draw_line("Things to Know About", font_size=14, bold=True)
-    y -= 6
-    if anomalies:
-        draw_line("Potential issues detected:", indent=12, font_size=11, bold=True)
-        for note in anomalies[:4]:
-            draw_wrapped(f"• {note}", indent=24, font_size=9)
+    # Timezone note — fully wrapped, sized to content, stays within margins
+    _TZ_FS   = 7.5
+    _TZ_LH   = 11   # line height in points
+    _TZ_X    = LM + 8
+    _TZ_AVAIL = UW - 20   # available text width in points
+    _TZ_CPL  = max(40, int(_TZ_AVAIL / (_TZ_FS * 0.52)))  # chars per line
+
+    if _is_utc:
+        _tz_text = (
+            "Timezone note:  "
+            "All hours are in UTC (Coordinated Universal Time) as recorded by the sensor. "
+            "To convert: subtract 5 hrs for Eastern Standard Time (EST, Nov-Mar) "
+            "or 4 hrs for Eastern Daylight Time (EDT, Mar-Nov). "
+            "Example: 14:00 UTC = 9:00 AM EST  |  10:00 AM EDT."
+        )
     else:
-        draw_line("No major issues detected in this dataset.", indent=12)
-    y -= 12
+        _tz_text = f"Timezone note:  Hours shown in {_tz_lbl} (local time applied at analysis time)."
 
-    # Tips
-    draw_line("Tips for Using This Data", font_size=14, bold=True)
-    y -= 6
-    draw_wrapped(
-        "1. Use AQI as your guide for outdoor activities. When AQI is high, limit time outside.",
-        indent=12, font_size=9
-    )
-    draw_wrapped(
-        "2. Sensitive groups (kids, elderly, people with asthma) should be extra careful on high-AQI days.",
-        indent=12, font_size=9
-    )
-    draw_wrapped(
-        "3. One sensor's data doesn't represent your whole town. Compare with nearby sensors if available.",
-        indent=12, font_size=9
-    )
-    draw_wrapped(
-        "4. Weather and location matter. Wind, rain, and nearby traffic all affect air quality.",
-        indent=12, font_size=9
-    )
-    y -= 12
+    _tz_lines = textwrap.wrap(_tz_text, width=_TZ_CPL)
+    _tz_box_h = max(20, len(_tz_lines) * _TZ_LH + 10)
+    _need(_tz_box_h + 4)
+    _f(OFFWHITE); pdf.rect(LM, y[0] - _tz_box_h, UW, _tz_box_h, fill=1, stroke=0)
+    _ly = y[0] - 9
+    for _li, _lt in enumerate(_tz_lines):
+        _f((0.42, 0.24, 0.00) if _li == 0 else MGREY)
+        pdf.setFont("Helvetica-Bold" if _li == 0 else "Helvetica", _TZ_FS)
+        pdf.drawString(_TZ_X, _ly, _lt)
+        _ly -= _TZ_LH
+    y[0] -= _tz_box_h + 6
 
-    # Charts
-    for title, path in figures:
-        if y < 220:
-            pdf.showPage()
-            y = height - 54
-        draw_line(title, font_size=12, bold=True)
-        image = ImageReader(str(path))
-        img_width = width - 108
-        img_height = img_width * 0.45
-        pdf.drawImage(image, 54, y - img_height, width=img_width, height=img_height)
-        y -= img_height + 20
 
-    # Footer
-    if y < 60:
-        pdf.showPage()
-        y = height - 54
-    
-    y -= 20
-    pdf.setFont("Helvetica", 8)
-    pdf.drawString(54, y, "Report generated by PurpleAir Local Analyzer")
-    pdf.drawString(54, y - 12, "For health questions, consult your doctor or local health department.")
+    # ─────────────────────────────────────────────────────────────────────────
+    # PAGE 5 — PRACTICAL TIPS + ABOUT THIS DATA
+    # ─────────────────────────────────────────────────────────────────────────
+    _newpage()
+    _section("What You Can Do — Personalized Guidance Based on Your Data")
+    y[0] -= 8
 
+    # Build personalized tips from actual monitoring data (no em-dashes in any text)
+    _ts_tips = "timestamp" if "timestamp" in hourly.columns else hourly.columns[0]
+    _h_tips  = hourly.copy()
+    _h_tips["_hr"] = pd.to_datetime(_h_tips[_ts_tips], errors="coerce").dt.hour
+    _pm_tips = "pm25_corrected" if "pm25_corrected" in _h_tips.columns else "pm25"
+    _d_tips  = _h_tips.groupby("_hr")[_pm_tips].mean().dropna()
+    _peak_hr  = int(_d_tips.idxmax()) if len(_d_tips) > 0 else 6
+    _clean_hr = int(_d_tips.idxmin()) if len(_d_tips) > 0 else 3
+    _peak_val = round(float(_d_tips[_peak_hr]),  1) if len(_d_tips) > 0 else 0.0
+    _clean_val= round(float(_d_tips[_clean_hr]), 1) if len(_d_tips) > 0 else 0.0
+
+    # Reuse _is_utc, _tz_lbl and _tz_short computed in the chart section above
+    def _hfmt_tip(h):
+        if _is_utc:
+            return f"{h:02d}:00 UTC"
+        return f"{h % 12 or 12}:00 {'AM' if h < 12 else 'PM'} ({_tz_short} time)"
+
+    # UTC-to-local conversion reminder for Tip 2 if needed
+    _tz_tip_note = (" (All times are UTC; subtract 4 hrs for EDT or 5 hrs for EST.)" if _is_utc else "")
+
+    # Tip 1: personalized to WHO PM2.5 guideline exceedance (not AQI-based)
+    if _within_who_pct >= 99:
+        _tip1_body = (f"PM2.5 remained below the WHO guideline of 15 µg/m3 for {_within_who_pct}% of "
+                      f"the monitoring period. Outdoor activity is appropriate for all population groups "
+                      f"during these conditions. If concentrations rise above 15 µg/m3, children, "
+                      f"elderly adults, and individuals with respiratory conditions should reduce "
+                      f"prolonged outdoor exertion.")
+    elif _within_who_pct >= 90:
+        _tip1_body = (f"PM2.5 remained below the WHO guideline of 15 µg/m3 for {_within_who_pct}% of "
+                      f"the monitoring period. When PM2.5 exceeds 15 µg/m3 (the remaining "
+                      f"{round(100 - _within_who_pct, 1)}% of the time), children, elderly adults, and "
+                      f"people with respiratory conditions should reduce prolonged outdoor activities.")
+    else:
+        _tip1_body = (f"PM2.5 exceeded the WHO guideline of 15 µg/m3 for {_who_pct}% of the monitoring "
+                      f"period. During these elevated periods, children, elderly adults, pregnant women, "
+                      f"and individuals with asthma or heart conditions should reduce prolonged vigorous "
+                      f"outdoor activity and consider using a HEPA air purifier indoors.")
+
+    # Tip 2: personalized to peak hour with explicit timezone
+    _tip2_body = (f"Data from this monitoring period shows average PM2.5 is highest around "
+                  f"{_hfmt_tip(_peak_hr)} ({_peak_val} ug/m3) and lowest around "
+                  f"{_hfmt_tip(_clean_hr)} ({_clean_val} ug/m3){_tz_tip_note}. "
+                  f"Schedule outdoor exercise, children's play, and gardening during the "
+                  f"low-concentration hours for reduced exposure.")
+
+    # Tip 3: personalized to WHO exceedance context
+    if who_h == 0:
+        _tip3_body = ("PM2.5 stayed below the WHO guideline of 15 ug/m3 for every individual hour "
+                      "of this monitoring period. This is an excellent result. Keep windows open "
+                      "during your cleanest hours to refresh indoor air without concern.")
+    else:
+        _tip3_body = (f"On the {who_h} hours that exceeded the WHO guideline of 15 ug/m3 "
+                      f"({_who_pct}% of monitoring time), keeping windows closed and running "
+                      f"a HEPA air purifier indoors can meaningfully reduce your personal exposure. "
+                      f"A portable HEPA filter can remove up to 80% of fine particles from a room.")
+
+    # Tip 4: peak PM2.5 context
+    _tip4_body = (f"The highest recorded hourly average during this period was {_pm25_max_val:.1f} ug/m3. "
+                  f"This brief peak was still below the EPA 24-hour standard of 35 ug/m3, which means "
+                  f"no hour during this monitoring period reached the level where the EPA considers air "
+                  f"unhealthy for sensitive groups." if _pm25_max_val < 35 else
+                  f"The highest hourly average of {_pm25_max_val:.1f} ug/m3 exceeded the EPA 24-hour "
+                  f"standard of 35 ug/m3. During such peaks, reduce outdoor time, especially for "
+                  f"children, elderly residents, and anyone with respiratory conditions.")
+
+    # Tip 5: sensitive groups
+    _tip5_body = ("Children, pregnant women, elderly residents, and anyone with asthma, heart disease, "
+                  "or lung conditions are more sensitive to fine particles. Their breathing rate is "
+                  "higher relative to body size, increasing exposure. On Moderate days and above, "
+                  "prioritize indoor activities or shorten outdoor time for these groups.")
+
+    # Tip 6: sensor coverage note
+    _tip6_body = ("This sensor captures air quality at one specific location. Readings can vary "
+                  "significantly within a neighborhood depending on proximity to roads, kitchens, "
+                  "or green spaces. For a broader picture, compare this data with nearby sensors "
+                  "or official monitoring stations in your area.")
+
+    TIPS = [
+        ("Your data: air quality overview",             _tip1_body),
+        ("Best and worst hours for outdoor activity",   _tip2_body),
+        ("What to do during elevated pollution hours",  _tip3_body),
+        ("Understanding the peak reading",              _tip4_body),
+        ("Extra care for sensitive household members",  _tip5_body),
+        ("What this sensor covers",                     _tip6_body),
+    ]
+    for i, (tip_title, tip_body) in enumerate(TIPS):
+        _need(62)
+        tip_top = y[0]
+        _f(TEAL); pdf.circle(LM + 13, tip_top - 12, 11, fill=1, stroke=0)
+        pdf.setFont("Helvetica-Bold", 11); _f(WHITE)
+        pdf.drawCentredString(LM + 13, tip_top - 16, str(i + 1))
+        _at(tip_title, LM + 30, tip_top - 7, "Helvetica-Bold", 10.5, NAVY)
+        y[0] = tip_top - 23
+        _wrap(tip_body, x=LM + 30, avail=UW - 34, font="Helvetica",
+              size=9.5, color=DGREY, lh=13, after=18)
+
+    # About this data — two-column rows, values wrap freely (no truncation)
+    _section("About This Measurement")
+    y[0] -= 8
+    qs    = summary.get("quality_score", 0)
+    agree = summary.get("channel_agreement_pct")
+    n_rd  = summary.get("total_readings", 0)
+    qs_l  = ("Excellent — publication-ready" if qs >= 90 else
+             "Good — reliable for general use" if qs >= 70 else "Fair — interpret with caution")
+
+    INFO = [
+        ("Sensor",
+         "PurpleAir optical particle counter — Plantower laser sensor + BME280 humidity/temperature chip"),
+        ("PM2.5 Correction",
+         "EPA Barkjohn formula applied per-reading using concurrent humidity (Barkjohn et al., 2021). "
+         "Formula: Corrected PM2.5 = 0.534 × raw_PM − 0.0844 × RH + 5.604"),
+        ("Total readings",
+         f"{n_rd:,} measurements recorded approximately every 2 minutes over the monitoring period"),
+        ("Data quality score",
+         f"{qs}% — {qs_l}  (formula: 0.4 × validity + 0.6 × temporal coverage)"),
+        ("Sensor agreement",
+         f"{agree}% channel-to-channel agreement between the dual internal sensors" if agree
+         else "Single-channel dataset — dual-channel agreement check not available"),
+        ("Note",
+         "This is a Community Summary Report with no statistical jargon. For full methodology, "
+         "sensor drift analysis, and quality-control charts, see the Research Report."),
+    ]
+    LBL_W = 132   # label column width
+    VAL_X = LM + LBL_W + 8
+    VAL_W = UW - LBL_W - 12
+
+    for idx, (lbl, val) in enumerate(INFO):
+        _need(26)
+        row_y = y[0]
+        # Alternating row background
+        _f(LGREY if idx % 2 == 0 else WHITE)
+        pdf.rect(LM, row_y - 26, UW, 26, fill=1, stroke=0)
+        # Label
+        pdf.setFont("Helvetica-Bold", 8.5); _f(NAVY)
+        pdf.drawString(LM + 8, row_y - 10, lbl + ":")
+        # Value wraps in right column from the same row_y baseline
+        y[0] = row_y - 4
+        _wrap(val, x=VAL_X, avail=VAL_W, font="Helvetica", size=8.5, color=DGREY, lh=12, after=4)
+        # Ensure y advances at least past this row
+        y[0] = min(y[0], row_y - 26)
+    y[0] -= 6
+
+    # ── Monitoring Summary — 4 key tiles + verdict (moved here from Page 1) ────
+    _need(80)
+    y[0] -= 10
+    _at("Monitoring Summary", LM, y[0], "Helvetica-Bold", 10, NAVY)
+    y[0] -= 16
+    tw4 = (UW - 9) / 4
+    stat_tiles = [
+        ("Avg PM2.5 (EPA-corrected)",  f"{pm_corr} µg/m³"),
+        ("Highest Hourly PM2.5",       f"{summary.get('pm25_max', '0')} µg/m³"),
+        ("Data Quality Score",         f"{summary.get('quality_score', '0')}%"),
+        ("Total Readings",             f"{summary.get('total_readings', 0):,}"),
+    ]
+    for i, (lbl, val) in enumerate(stat_tiles):
+        tx = LM + i * (tw4 + 3)
+        _f(LGREY); pdf.rect(tx, y[0] - 52, tw4, 52, fill=1, stroke=0)
+        _f(TEAL);  pdf.rect(tx, y[0], tw4, 3, fill=1, stroke=0)
+        _at(val, tx + 8, y[0] - 22, "Helvetica-Bold", 13, NAVY)
+        pdf.setFont("Helvetica", 7); _f(MGREY)
+        for chunk in textwrap.wrap(lbl, width=int((tw4 - 10) / 3.8)):
+            pdf.drawString(tx + 8, y[0] - 36, chunk)
+            break
+    y[0] -= 64
+
+    # Data Quality Score explanation note — wrapped to fit within margins
+    _DQS_FS  = 7.5
+    _DQS_LH  = 11
+    _DQS_CPL = max(40, int((UW - 20) / (_DQS_FS * 0.52)))
+    _dqs_txt = (
+        "Data Quality Score: measures how complete and valid the sensor data is. "
+        "Formula: 0.4 x validity + 0.6 x temporal coverage. "
+        "90%+ = Excellent (publication-ready).  70-89% = Good (reliable for general use).  "
+        "Below 70% = Fair — interpret results with caution."
+    )
+    _dqs_lines = textwrap.wrap(_dqs_txt, width=_DQS_CPL)
+    _dqs_box_h = max(20, len(_dqs_lines) * _DQS_LH + 10)
+    _need(_dqs_box_h + 4)
+    _f(OFFWHITE); pdf.rect(LM, y[0] - _dqs_box_h, UW, _dqs_box_h, fill=1, stroke=0)
+    _dly = y[0] - 9
+    pdf.setFont("Helvetica", _DQS_FS); _f(MGREY)
+    for _dl in _dqs_lines:
+        pdf.drawString(LM + 8, _dly, _dl)
+        _dly -= _DQS_LH
+    y[0] -= _dqs_box_h + 6
+
+    # Verdict strip — wrapped so long lines never cross the right margin
+    if _within_who_days_pct == 100:
+        _verdict_line = (f"PM2.5 remained at or below the WHO guideline of 15 µg/m3 "
+                         f"for all {_total_days} days monitored — no days had elevated pollution.")
+    elif _within_who_days_pct >= 80:
+        _verdict_line = (f"PM2.5 remained at or below the WHO guideline of 15 µg/m3 for "
+                         f"{_within_who_days} of {_total_days} days ({_within_who_days_pct}% of the period).")
+    else:
+        _verdict_line = (f"PM2.5 was within the WHO guideline of 15 µg/m3 for "
+                         f"{_within_who_days_pct}% of days ({_within_who_days} of {_total_days}).")
+    _verdict_sub = (f"No hours exceeded the WHO 15 µg/m3 guideline during the monitoring period."
+                    if who_h == 0 else
+                    f"Hours above WHO 15 µg/m3: {who_h} ({_who_pct}% of monitoring time). "
+                    f"PM2.5 below 15 µg/m3 for {_within_who_pct}% of the period.")
+    _v_textw = UW - 24
+    _v_lines = textwrap.wrap(_verdict_line, width=max(40, int(_v_textw / (9 * 0.50))))
+    _s_lines = textwrap.wrap(_verdict_sub,  width=max(40, int(_v_textw / (8 * 0.50))))
+    _strip_h = 12 + len(_v_lines) * 12 + 2 + len(_s_lines) * 11 + 6
+    _need(_strip_h + 6)
+    _f(OFFWHITE); _s(TEAL); pdf.setLineWidth(0.8)
+    pdf.roundRect(LM, y[0] - _strip_h, UW, _strip_h, 5, fill=1, stroke=1)
+    pdf.setLineWidth(0.4)
+    _f(TEAL); pdf.rect(LM, y[0] - _strip_h, 5, _strip_h, fill=1, stroke=0)
+    _vy = y[0] - 14
+    pdf.setFont("Helvetica-Bold", 9); _f(NAVY)
+    for _vl in _v_lines:
+        pdf.drawString(LM + 12, _vy, _vl); _vy -= 12
+    _vy -= 2
+    pdf.setFont("Helvetica", 8); _f(MGREY)
+    for _sl in _s_lines:
+        pdf.drawString(LM + 12, _vy, _sl); _vy -= 11
+    y[0] -= _strip_h + 8
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # OPTIONAL FINAL PAGE — HOUSE COMPARISON (only when comparison data passed)
+    # ─────────────────────────────────────────────────────────────────────────
+    _cmp_tmps = []
+    if comparison:
+        _CMP_COLORS = ["#1f7a8c", "#e07a5f", "#f6aa1c", "#4c956c", "#8f3f97",
+                       "#ff7e00", "#2a9d8f", "#c1121f", "#6a4c93"]
+
+        def _cmp_overlay(kind, title):
+            import tempfile as _tf2, os as _os4
+            ser = []
+            for h in comparison:
+                rm = h.get("rolling_median") or {}
+                if kind == "24h":
+                    xs, ys = rm.get("timestamps") or [], rm.get("median_24h") or []
+                else:
+                    xs, ys = rm.get("median_1h_timestamps") or [], rm.get("median_1h") or []
+                if not xs or not ys:
+                    continue
+                n = min(len(xs), len(ys))
+                try:
+                    xdt = pd.to_datetime(pd.Series(xs[:n]), errors="coerce")
+                except Exception:
+                    continue
+                ser.append((h.get("label") or "House", xdt,
+                            pd.Series(ys[:n], dtype="float64"), bool(h.get("is_control"))))
+            if not ser:
+                return None
+            # Dense 1h series get thinner lines than the smoother 24h series
+            _ctl_lw = 1.7 if kind == "1h" else 2.0
+            _oth_lw = 0.85 if kind == "1h" else 1.1
+            fig, ax = plt.subplots(figsize=(9.2, 3.5))
+            ci = 0
+            for lbl, xdt, yv, is_ctl in sorted(ser, key=lambda t: t[3]):
+                _avg = float(yv.mean()) if len(yv.dropna()) else float("nan")
+                _avg_txt = f"  ·  avg {_avg:.1f}" if _avg == _avg else ""
+                if is_ctl:
+                    ax.plot(xdt, yv, color="#0a1f47", linewidth=_ctl_lw,
+                            solid_capstyle="round", solid_joinstyle="round",
+                            label=f"{lbl} (Control){_avg_txt}", zorder=6)
+                else:
+                    ax.plot(xdt, yv, color=_CMP_COLORS[ci % len(_CMP_COLORS)],
+                            linewidth=_oth_lw, alpha=0.82,
+                            solid_capstyle="round", solid_joinstyle="round",
+                            label=f"{lbl}{_avg_txt}", zorder=3); ci += 1
+            ax.axhline(15, color="#00a651", lw=0.9, ls=(0, (4, 3)), alpha=0.75)
+            ax.axhline(35, color="#e67e22", lw=0.9, ls=(0, (4, 3)), alpha=0.7)
+            ax.set_ylabel("PM2.5 (µg/m³)", fontsize=9)
+            ax.set_title(title, fontsize=10.5, fontweight="bold", pad=8)
+            _leg = ax.legend(fontsize=7.5, loc="upper right", framealpha=0.92,
+                             ncol=2 if len(ser) > 3 else 1, handlelength=1.6,
+                             borderpad=0.5, columnspacing=1.0)
+            _leg.get_frame().set_edgecolor("#d9d9d9"); _leg.get_frame().set_linewidth(0.6)
+            ax.margins(x=0.01)
+            ax.grid(axis="y", alpha=0.16, linewidth=0.6)
+            ax.tick_params(labelsize=7.5)
+            for _sp in ("top", "right"):
+                ax.spines[_sp].set_visible(False)
+            for _sp in ("left", "bottom"):
+                ax.spines[_sp].set_color("#bcbcbc"); ax.spines[_sp].set_linewidth(0.7)
+            # Denser, evenly-spaced date ticks so the axis is easy to read precisely
+            import matplotlib.dates as _mdates
+            _loc = _mdates.AutoDateLocator(minticks=8, maxticks=16)
+            ax.xaxis.set_major_locator(_loc)
+            ax.xaxis.set_major_formatter(_mdates.ConciseDateFormatter(_loc))
+            fig.autofmt_xdate(rotation=30); fig.tight_layout(pad=1.0)
+            _fd, _p = _tf2.mkstemp(suffix=".png"); _os4.close(_fd)
+            fig.savefig(_p, dpi=180, bbox_inches="tight"); plt.close(fig)
+            return _p
+
+        _newpage()
+        _section("How Your House Compares — Nearby Houses")
+        y[0] -= 4
+        _wrap(
+            "These charts compare the smoothed PM2.5 trend of each house in this study. "
+            "The Control House (your reference location) is drawn as a bold dark line; "
+            "the other houses are overlaid so you can see which run cleaner or dirtier. "
+            "The dotted lines mark the WHO guideline (15 µg/m³) and the EPA standard (35 µg/m³).",
+            lh=13, after=10
+        )
+        for _k, _t in (("24h", "24-Hour Median PM2.5 — Control House vs Others"),
+                       ("1h",  "1-Hour Median PM2.5 — Control House vs Others")):
+            _png = _cmp_overlay(_k, _t)
+            if _png:
+                _cmp_tmps.append(_png)
+                _IMG_H = 215
+                _need(_IMG_H + 12)
+                pdf.drawImage(ImageReader(_png), LM, y[0] - _IMG_H, UW, _IMG_H,
+                              preserveAspectRatio=True, mask="auto")
+                y[0] -= _IMG_H + 10
+
+    _stamp()
     pdf.save()
+
+    for _p in _cmp_tmps:
+        try: _os.unlink(_p)
+        except Exception: pass
 
 
 def build_comparison_pdf(
@@ -2841,10 +3875,20 @@ def build_comparison_pdf(
     y = height - 54
     page_num = [1]
 
+    # Timezone footer label, taken from the analyses (all share the same zone
+    # when produced from one comparison run). Defaults to UTC.
+    _cmp_tz = "UTC"
+    for _a in (analyses or []):
+        _t = (_a.get("summary") or {}).get("tz_label")
+        if _t and _t != "UTC":
+            _cmp_tz = f"{_t.split('/')[-1].replace('_', ' ')} local time"
+            break
+    _cmp_tz_footer = "All times UTC" if _cmp_tz == "UTC" else f"All times {_cmp_tz}"
+
     def _footer():
         pdf.setFont("Helvetica", 7)
         pdf.setFillColorRGB(0.55, 0.55, 0.55)
-        pdf.drawString(L, 28, "PurpleAir Local Analyzer  |  Comparison Report  |  All times UTC")
+        pdf.drawString(L, 28, f"PurpleAir Local Analyzer  |  Comparison Report  |  {_cmp_tz_footer}")
         pdf.drawRightString(width - R, 28, f"Page {page_num[0]}")
         pdf.setFillColorRGB(0, 0, 0)
 
@@ -2931,62 +3975,189 @@ def build_comparison_pdf(
 
     # ── Section 2: Key metrics comparison table ──────────────────────────────
     _section("2.  Key Metrics Comparison")
-
-    # Column header row (simple text table)
-    col_w = [180, 70, 60, 60, 70]  # widths in pts
-    headers = ["File", "Avg PM2.5\n(EPA corr.)", "Avg AQI", "Quality\nScore %", "Sensor CV %"]
-    row_h = 13
-    x_positions = [L]
-    for cw in col_w[:-1]:
-        x_positions.append(x_positions[-1] + cw)
-
-    if y < B + 60:
+    if y < B + 80:
         _new_page()
 
-    pdf.setFont("Helvetica-Bold", 9)
-    pdf.setFillColorRGB(0.10, 0.22, 0.45)
-    for xi, hdr in zip(x_positions, headers):
-        pdf.drawString(xi, y, hdr.replace("\n", " "))
-    y -= row_h
-    _rule(0.3)
+    # Clean grid: left-aligned name, right-aligned numerics, navy header bar,
+    # alternating row shading. No AQI column — a PM2.5-only sensor cannot yield
+    # a valid multi-pollutant Air Quality Index.
+    #               House        Avg PM2.5   vs Control   Quality %   Sensor CV
+    _cw   = [196, 78, 78, 76, 76]                 # sums to 504 = USABLE_W
+    _cx   = [L]
+    for _w in _cw[:-1]:
+        _cx.append(_cx[-1] + _w)
+    _rx   = [_cx[i] + _cw[i] - 6 for i in range(len(_cw))]   # right edges for numerics
+    _hdrs = ["House", "Avg PM2.5", "vs Control", "Data Qual.", "Sensor CV"]
+    _units = ["", "µg/m³", "µg/m³", "%", "%"]
+    _row_h = 16
 
-    pdf.setFont("Helvetica", 9)
-    pdf.setFillColorRGB(0, 0, 0)
+    # Header bar
+    pdf.setFillColorRGB(0.10, 0.22, 0.45)
+    pdf.rect(L, y - _row_h + 3, USABLE_W, _row_h, fill=1, stroke=0)
+    pdf.setFont("Helvetica-Bold", 8.5)
+    pdf.setFillColorRGB(1, 1, 1)
+    pdf.drawString(_cx[0] + 4, y - 9, _hdrs[0])
+    for i in range(1, len(_hdrs)):
+        pdf.drawRightString(_rx[i], y - 9, _hdrs[i])
+    y -= _row_h
+
     baseline_pm = None
+    pdf.setFont("Helvetica", 8.5)
     for idx, (a, fname) in enumerate(zip(analyses, filenames)):
-        if y < B:
-            _new_page()
-            pdf.setFont("Helvetica", 9)
+        if y < B + 4:
+            _new_page(); pdf.setFont("Helvetica", 8.5)
         s = a.get("summary", {})
         pm_raw = s.get("pm25_average_epa_corrected") or s.get("pm25_average")
         pm_val = round(float(pm_raw), 1) if pm_raw is not None else None
         if idx == 0:
             baseline_pm = pm_val
-        aqi_val = s.get("aqi_average")
-        qs_val  = s.get("quality_score")
-        cv_val  = s.get("sensor_health_cv")
+        qs_val = s.get("quality_score")
+        cv_val = s.get("sensor_health_cv")
 
-        short_name = fname if len(fname) <= 26 else fname[:23] + "…"
-        delta_pm = ""
-        if idx > 0 and pm_val is not None and baseline_pm is not None:
+        # Row shading (alternating) + control highlight
+        is_ctl = bool(a.get("is_control")) or idx == 0
+        if is_ctl:
+            pdf.setFillColorRGB(0.93, 0.95, 0.99)
+        else:
+            pdf.setFillColorRGB(0.97, 0.97, 0.96) if idx % 2 else pdf.setFillColorRGB(1, 1, 1)
+        pdf.rect(L, y - _row_h + 4, USABLE_W, _row_h, fill=1, stroke=0)
+
+        name = a.get("label") or fname or f"House {idx}"
+        if is_ctl and "control" not in name.lower():
+            name = f"{name} (Control)"
+        name = name if len(name) <= 30 else name[:29] + "…"
+        if idx == 0:
+            vs_ctl = "— (ref)"
+        elif pm_val is not None and baseline_pm is not None:
             d = pm_val - baseline_pm
-            delta_pm = f" ({'+' if d >= 0 else ''}{d:.1f})"
+            vs_ctl = f"{'+' if d >= 0 else ''}{d:.1f}"
+        else:
+            vs_ctl = "N/A"
 
-        row_vals = [
-            short_name,
-            f"{pm_val:.1f}{delta_pm}" if pm_val is not None else "N/A",
-            str(int(aqi_val)) if aqi_val is not None else "N/A",
-            str(int(qs_val))  if qs_val  is not None else "N/A",
-            f"{cv_val:.1f}%"  if cv_val  is not None else "N/A",
-        ]
-        for xi, val in zip(x_positions, row_vals):
-            pdf.drawString(xi, y, val)
-        y -= row_h
+        pdf.setFillColorRGB(0.12, 0.12, 0.12)
+        pdf.setFont("Helvetica-Bold" if is_ctl else "Helvetica", 8.5)
+        pdf.drawString(_cx[0] + 4, y - 8, name)
+        pdf.setFont("Helvetica", 8.5)
+        pdf.drawRightString(_rx[1], y - 8, f"{pm_val:.1f}" if pm_val is not None else "N/A")
+        pdf.drawRightString(_rx[2], y - 8, vs_ctl)
+        pdf.drawRightString(_rx[3], y - 8, f"{int(qs_val)}" if qs_val is not None else "N/A")
+        pdf.drawRightString(_rx[4], y - 8, f"{cv_val:.1f}" if cv_val is not None else "N/A")
+        y -= _row_h
+    pdf.setFillColorRGB(0, 0, 0)
 
-    y -= 8
+    y -= 6
+    pdf.setFont("Helvetica-Oblique", 7.5); pdf.setFillColorRGB(0.45, 0.45, 0.45)
+    pdf.drawString(L, y, "Units: PM2.5 and vs-Control in µg/m³ (EPA-corrected); Data Quality and Sensor CV in %. "
+                         "Lower Sensor CV = better dual-channel agreement.")
+    pdf.setFillColorRGB(0, 0, 0)
+    y -= 16
 
-    # ── Section 3: Interpretation & Narrative ───────────────────────────────
-    _section("3.  Interpretation & Key Findings")
+    # ── Section 2b: House comparison charts (1h + 24h median) ────────────────
+    _HOUSE_COLORS = ["#1f7a8c", "#e07a5f", "#f6aa1c", "#4c956c", "#8f3f97",
+                     "#ff7e00", "#2a9d8f", "#c1121f", "#6a4c93"]
+
+    def _render_median_overlay(kind: str, title: str):
+        """Build a matplotlib overlay of per-house rolling medians.
+        kind='24h' -> timestamps + median_24h ; kind='1h' -> median_1h_*.
+        Control House (analyses[*]['is_control']) drawn bold/dark on top.
+        Returns a temp PNG path or None if there is no data."""
+        import tempfile as _tf, os as _os2
+        series = []          # (label, x, y, is_control)
+        for idx2, a2 in enumerate(analyses):
+            rm = a2.get("rolling_median") or {}
+            if kind == "24h":
+                xs = rm.get("timestamps") or []
+                ys = rm.get("median_24h") or []
+            else:
+                xs = rm.get("median_1h_timestamps") or []
+                ys = rm.get("median_1h") or []
+            if not xs or not ys:
+                continue
+            n = min(len(xs), len(ys))
+            try:
+                xdt = pd.to_datetime(pd.Series(xs[:n]), errors="coerce")
+            except Exception:
+                continue
+            yv = pd.Series(ys[:n], dtype="float64")
+            lbl = a2.get("label") or (filenames[idx2] if idx2 < len(filenames) else f"House {idx2}")
+            series.append((lbl, xdt, yv, bool(a2.get("is_control"))))
+        if not series:
+            return None
+
+        _ctl_lw = 1.7 if kind == "1h" else 2.0
+        _oth_lw = 0.85 if kind == "1h" else 1.1
+        fig, ax = plt.subplots(figsize=(9.4, 3.6))
+        ci = 0
+        # Draw non-control first, control last (on top)
+        for lbl, xdt, yv, is_ctl in sorted(series, key=lambda t: t[3]):
+            _avg = float(yv.mean()) if len(yv.dropna()) else float("nan")
+            _avg_txt = f"  ·  avg {_avg:.1f}" if _avg == _avg else ""
+            if is_ctl:
+                ax.plot(xdt, yv, color="#0a1f47", linewidth=_ctl_lw,
+                        solid_capstyle="round", solid_joinstyle="round",
+                        label=f"{lbl} (Control){_avg_txt}", zorder=6)
+            else:
+                ax.plot(xdt, yv, color=_HOUSE_COLORS[ci % len(_HOUSE_COLORS)],
+                        linewidth=_oth_lw, alpha=0.82,
+                        solid_capstyle="round", solid_joinstyle="round",
+                        label=f"{lbl}{_avg_txt}", zorder=3)
+                ci += 1
+        ax.axhline(15, color="#00a651", lw=0.9, ls=(0, (4, 3)), alpha=0.75)
+        ax.axhline(35, color="#e67e22", lw=0.9, ls=(0, (4, 3)), alpha=0.7)
+        ax.text(1.005, 15, "WHO 15", transform=ax.get_yaxis_transform(),
+                va="center", fontsize=7, color="#00a651")
+        ax.text(1.005, 35, "EPA 35", transform=ax.get_yaxis_transform(),
+                va="center", fontsize=7, color="#e67e22")
+        ax.set_ylabel("PM2.5 (µg/m³)", fontsize=9)
+        ax.set_title(title, fontsize=10.5, fontweight="bold", pad=8)
+        _leg = ax.legend(fontsize=7.5, loc="upper right", framealpha=0.92,
+                         ncol=2 if len(series) > 3 else 1, handlelength=1.6,
+                         borderpad=0.5, columnspacing=1.0)
+        _leg.get_frame().set_edgecolor("#d9d9d9"); _leg.get_frame().set_linewidth(0.6)
+        ax.margins(x=0.01)
+        ax.grid(axis="y", alpha=0.16, linewidth=0.6)
+        ax.tick_params(labelsize=7.5)
+        for _sp in ("top", "right"):
+            ax.spines[_sp].set_visible(False)
+        for _sp in ("left", "bottom"):
+            ax.spines[_sp].set_color("#bcbcbc"); ax.spines[_sp].set_linewidth(0.7)
+        # Denser, evenly-spaced date ticks so the axis is easy to read precisely
+        import matplotlib.dates as _mdates
+        _loc = _mdates.AutoDateLocator(minticks=8, maxticks=16)
+        ax.xaxis.set_major_locator(_loc)
+        ax.xaxis.set_major_formatter(_mdates.ConciseDateFormatter(_loc))
+        fig.autofmt_xdate(rotation=30)
+        fig.tight_layout(pad=1.0)
+        _fd, _p = _tf.mkstemp(suffix=".png"); _os2.close(_fd)
+        fig.savefig(_p, dpi=180, bbox_inches="tight"); plt.close(fig)
+        return _p
+
+    _tmp_charts = []
+    try:
+        _section("3.  House Comparison — Rolling Median PM2.5")
+        _wrapped("The Control House is drawn as a bold dark line; every other house is "
+                 "overlaid for direct comparison. Dotted lines mark the WHO 24-hour guideline "
+                 "(15 µg/m³) and the EPA 24-hour standard (35 µg/m³).", size=9, color=(0.3, 0.3, 0.3))
+        for _kind, _ttl in (("24h", "24-Hour Median PM2.5 — Control House vs Others"),
+                            ("1h",  "1-Hour Median PM2.5 — Control House vs Others")):
+            _png = _render_median_overlay(_kind, _ttl)
+            if _png:
+                _tmp_charts.append(_png)
+                IMG_H = 210
+                if y < B + IMG_H + 10:
+                    _new_page()
+                pdf.drawImage(ImageReader(_png), L, y - IMG_H, USABLE_W, IMG_H,
+                              preserveAspectRatio=True, mask="auto")
+                y -= IMG_H + 12
+            else:
+                _line(f"({_ttl}: no rolling-median data available)", size=8, color=(0.5, 0.5, 0.5))
+    except Exception as _ce:
+        _line(f"(House comparison charts unavailable: {_ce})", size=8, color=(0.5, 0.5, 0.5))
+
+    y -= 6
+
+    # ── Section 4: Interpretation & Narrative ───────────────────────────────
+    _section("4.  Interpretation & Key Findings")
 
     # Best/worst file identification
     pm_vals = [(a.get("summary", {}).get("pm25_average_epa_corrected") or a.get("summary", {}).get("pm25_average"), fn)
@@ -3016,28 +4187,32 @@ def build_comparison_pdf(
 
     y -= 4
 
-    # AQI health context
+    # Health context — framed on PM2.5 concentration vs WHO/EPA thresholds
+    # (not AQI, which requires multiple pollutants this sensor does not measure).
     _line("Health Context:", bold=True, size=10)
-    aqi_avgs = [a.get("summary", {}).get("aqi_average") for a in analyses]
-    aqi_avgs_clean = [v for v in aqi_avgs if v is not None]
-    if aqi_avgs_clean:
-        overall_avg = sum(aqi_avgs_clean) / len(aqi_avgs_clean)
-        if overall_avg <= 50:
-            cat = "Good — Air quality is satisfactory with minimal health risk for all groups."
-        elif overall_avg <= 100:
-            cat = "Moderate — Acceptable quality; sensitive individuals may notice mild effects."
-        elif overall_avg <= 150:
-            cat = "Unhealthy for Sensitive Groups — People with respiratory/heart conditions should limit prolonged outdoor exposure."
-        elif overall_avg <= 200:
-            cat = "Unhealthy — Everyone may experience health effects; sensitive groups at greater risk."
+    pm_avgs = [(a.get("summary", {}).get("pm25_average_epa_corrected")
+                or a.get("summary", {}).get("pm25_average")) for a in analyses]
+    pm_avgs_clean = [float(v) for v in pm_avgs if v is not None]
+    if pm_avgs_clean:
+        overall_pm = sum(pm_avgs_clean) / len(pm_avgs_clean)
+        if overall_pm <= 15:
+            cat = ("within the WHO 24-hour guideline (15 µg/m³) — generally protective for all "
+                   "groups, including children, older adults, and people with heart or lung conditions.")
+        elif overall_pm <= 35:
+            cat = ("above the stricter WHO guideline (15 µg/m³) but within the U.S. EPA 24-hour "
+                   "standard (35 µg/m³). Sensitive groups should limit prolonged outdoor exertion on higher days.")
+        elif overall_pm <= 55:
+            cat = ("above the EPA 24-hour standard (35 µg/m³). People with respiratory or heart "
+                   "conditions should reduce prolonged outdoor exposure.")
         else:
-            cat = "Very Unhealthy / Hazardous — Avoid outdoor activity. Health warnings of emergency conditions."
-        _wrapped(f"Overall average AQI across all files: {overall_avg:.0f} — {cat}", indent=10)
+            cat = ("well above the EPA 24-hour standard (35 µg/m³). Reducing outdoor exposure is "
+                   "advisable for everyone, especially sensitive groups.")
+        _wrapped(f"Mean PM2.5 (EPA-corrected) across all files: {overall_pm:.1f} µg/m³ — {cat}", indent=10)
 
     y -= 6
 
     # ── Section 4: Per-file summaries ────────────────────────────────────────
-    _section("4.  Per-File Detailed Summaries")
+    _section("5.  Per-File Detailed Summaries")
     for idx, (a, fname) in enumerate(zip(analyses, filenames)):
         if y < B + 80:
             _new_page()
@@ -3046,7 +4221,8 @@ def build_comparison_pdf(
         dr = s.get("date_range", {})
         _line(f"  Period: {str(dr.get('start','N/A'))[:10]}  to  {str(dr.get('end','N/A'))[:10]}   |   {s.get('total_readings','N/A')} readings", size=9, indent=10, color=(0.4, 0.4, 0.4))
         pm_corr = s.get("pm25_average_epa_corrected") or s.get("pm25_average")
-        _line(f"  Avg PM2.5 (EPA-corr.): {round(float(pm_corr),1) if pm_corr else 'N/A'} µg/m³   |   Avg AQI: {s.get('aqi_average','N/A')}   |   Category: {s.get('aqi_category','N/A')}", size=9, indent=10)
+        pm_max  = s.get("pm25_max")
+        _line(f"  Avg PM2.5 (EPA-corr.): {round(float(pm_corr),1) if pm_corr else 'N/A'} µg/m³   |   Peak PM2.5: {round(float(pm_max),1) if pm_max else 'N/A'} µg/m³   |   WHO 15 / EPA 35 µg/m³", size=9, indent=10)
         _line(f"  Quality Score: {s.get('quality_score','N/A')}%   |   Validity: {s.get('validity_score','N/A')}%   |   Coverage: {s.get('coverage_score','N/A')}%", size=9, indent=10)
         cv = s.get("sensor_health_cv")
         status = s.get("sensor_validation_status", "N/A")
@@ -3057,11 +4233,13 @@ def build_comparison_pdf(
         y -= 6
 
     # ── Section 5: Methodology notes ─────────────────────────────────────────
-    _section("5.  Methodology & Standards")
+    _section("6.  Methodology & Standards")
     _wrapped(
         "All PM2.5 values have been corrected using the EPA Barkjohn correction formula: "
         "PM2.5_corr = 0.534 × PM2.5_raw − 0.0844 × RH + 5.604 (where RH is available). "
-        "AQI calculated per US EPA breakpoints. Quality Score = 0.4 × Validity + 0.6 × Coverage. "
+        "Concentrations are evaluated against the WHO 24-hour guideline (15 µg/m³) and EPA "
+        "24-hour standard (35 µg/m³); no AQI is computed, as this sensor measures only PM2.5. "
+        "Quality Score = 0.4 × Validity + 0.6 × Coverage. "
         "Sensor health assessed using Coefficient of Variation (CV) between dual channels: "
         "CV < 10% = Excellent, 10–15% = Accepted, ≥15% = Invalid (recalibration required). "
         "Data sourced from PurpleAir low-cost optical particle counters."
@@ -3076,6 +4254,12 @@ def build_comparison_pdf(
 
     _footer()
     pdf.save()
+
+    # Clean up temp comparison-chart PNGs
+    import os as _os3
+    for _p in _tmp_charts:
+        try: _os3.unlink(_p)
+        except Exception: pass
 
 
 def analyze_dataset(
@@ -3110,6 +4294,43 @@ def analyze_dataset(
     ts_col = timestamp_primary.name if timestamp_primary else None
     lat_col = lat_primary.name if lat_primary else None
     lon_col = lon_primary.name if lon_primary else None
+
+    # ── Data-completeness assessment ─────────────────────────────────────────
+    # Tells the user (on the website) exactly which inputs were found and what
+    # the impact is when an important one is missing.
+    _has_dual_pm = bool(pm_a) and bool(pm_b)
+    _completeness_items = [
+        {"name": "Timestamp", "level": "required", "present": bool(ts_col),
+         "found": ts_col or "",
+         "impact": "Required for all time-based analysis. Without it, no analysis can run."},
+        {"name": "PM2.5", "level": "required", "present": bool(pm_col),
+         "found": pm_col or "",
+         "impact": "The core pollutant measured. Without it, there is nothing to analyze."},
+        {"name": "Relative Humidity", "level": "important", "present": bool(hum_col),
+         "found": hum_col or "",
+         "impact": ("Used by the EPA Barkjohn correction. If absent, the humidity term cannot be "
+                    "applied and uncorrected (raw) PM2.5 is shown instead — accuracy at high humidity is reduced.")},
+        {"name": "Temperature", "level": "optional", "present": bool(temp_col),
+         "found": temp_col or "",
+         "impact": "Used for sensor sanity checks and context. Not required for PM2.5 correction."},
+        {"name": "Pressure", "level": "optional", "present": bool(press_col),
+         "found": press_col or "",
+         "impact": "Used for sensor sanity checks only. Not required for the analysis."},
+        {"name": "Dual sensor (A/B channels)", "level": "recommended", "present": _has_dual_pm,
+         "found": (f"{pm_a.name} / {pm_b.name}" if _has_dual_pm else (pm_col or "")),
+         "impact": ("Two PM2.5 channels enable the inter-sensor agreement and drift checks that "
+                    "validate data reliability. With a single channel, those QA checks are unavailable.")},
+        {"name": "Location (latitude/longitude)", "level": "optional", "present": bool(lat_col and lon_col),
+         "found": (f"{lat_col} / {lon_col}" if (lat_col and lon_col) else ""),
+         "impact": "Used only for optional location context. Does not affect PM2.5 results."},
+    ]
+    _missing_important = [it["name"] for it in _completeness_items
+                          if not it["present"] and it["level"] in ("required", "important")]
+    data_completeness = {
+        "items": _completeness_items,
+        "missing_important": _missing_important,
+        "humidity_available": bool(hum_col),
+    }
 
     df_work = df.copy()
     if ts_col:
@@ -3198,10 +4419,29 @@ def analyze_dataset(
     if mask_below_ldl.any():
         cleaned.loc[mask_below_ldl, "pm25"] = LDL_corrected
     
-    if "humidity" in cleaned:
-        cleaned["pm25_corrected"] = apply_epa_correction(cleaned["pm25"], cleaned["humidity"])
+    # EPA Barkjohn needs relative humidity. Apply it where RH is available; for any
+    # reading with no valid RH (or when the humidity column is absent entirely), fall
+    # back to the raw value so the analysis never breaks and never shows NaN. We record
+    # whether — and how completely — the correction was applied for honest reporting.
+    if "humidity" in cleaned and cleaned["humidity"].notna().any():
+        hum_for_corr = cleaned["humidity"].where(cleaned["humidity"].between(*HUMID_RANGE), np.nan)
+        _corr = apply_epa_correction(cleaned["pm25"], hum_for_corr)
+        # Rows where RH was missing/invalid → correction is NaN → keep the raw value.
+        cleaned["pm25_corrected"] = _corr.fillna(cleaned["pm25"])
+        _rh_coverage = float(hum_for_corr.notna().mean())
+        _correction_applied = _rh_coverage > 0.0
     else:
-        cleaned["pm25_corrected"] = np.nan
+        # No humidity at all: correction cannot be applied — show raw PM2.5 (labeled).
+        cleaned["pm25_corrected"] = cleaned["pm25"]
+        _rh_coverage = 0.0
+        _correction_applied = False
+
+    # Barkjohn can produce negative values at high RH + low raw PM.
+    # A negative result means the sensor is reading below the detection limit.
+    # Apply the same below-detection treatment as for sub-LDL raw values: LDL/√2.
+    mask_negative = cleaned["pm25_corrected"] < 0
+    if mask_negative.any():
+        cleaned.loc[mask_negative, "pm25_corrected"] = LDL_corrected
 
     # Apply LDL correction to corrected PM2.5 as well
     mask_corrected_below_ldl = (cleaned["pm25_corrected"] > 0) & (cleaned["pm25_corrected"] < LDL)
@@ -3293,7 +4533,9 @@ def analyze_dataset(
             _std = float(np.nanstd(_res))
             if _std > 1e-6:
                 _n_events = int(np.sum(np.abs(_res) > 2.0 * _std))
-    if not daily.empty:
+    if not hourly_pm25.empty:
+        _pm25_max = float(hourly_pm25.dropna().max()) if not hourly_pm25.dropna().empty else 0.0
+    elif not daily.empty:
         _daily_pm = daily["pm25_corrected"].fillna(daily["pm25"]) if "pm25_corrected" in daily.columns else daily["pm25"]
         _pm25_max = float(_daily_pm.max()) if not _daily_pm.dropna().empty else 0.0
 
@@ -3371,9 +4613,10 @@ def analyze_dataset(
     stats_cols = [col for col in ["pm25", "pm25_corrected", "temperature", "humidity", "pressure"] if col in cleaned]
     stats = summarize_stats(cleaned, stats_cols) if stats_cols else pd.DataFrame()
 
+    _hourly_corrected = hourly["pm25_corrected"].fillna(hourly["pm25"]) if "pm25_corrected" in hourly.columns else hourly["pm25"] if "pm25" in hourly.columns else pd.Series(dtype=float)
     exceedances = {
-        "who_15": int((hourly["pm25"] > 15).sum()) if "pm25" in hourly else 0,
-        "epa_35": int((hourly["pm25"] > 35).sum()) if "pm25" in hourly else 0,
+        "who_15": int((_hourly_corrected > 15).sum()) if not _hourly_corrected.empty else 0,
+        "epa_35": int((_hourly_corrected > 35).sum()) if not _hourly_corrected.empty else 0,
     }
 
     events = detect_events(cleaned, "pm25")
@@ -3440,22 +4683,29 @@ def analyze_dataset(
             lambda value: value.isoformat() if pd.notna(value) else None
         )
 
+    # Use EPA-corrected PM2.5 for all time-of-day / weekday / heatmap patterns so
+    # they are consistent with the rest of the report (which is corrected throughout).
+    _pmc_col = "pm25_corrected" if "pm25_corrected" in cleaned.columns else "pm25"
+
     weekday_pattern = cleaned.copy()
     weekday_pattern["weekday"] = weekday_pattern.index.day_name()
-    weekday_summary = weekday_pattern.groupby("weekday")["pm25"].mean().reindex(
+    weekday_pattern["_pmc"] = weekday_pattern[_pmc_col].fillna(weekday_pattern["pm25"])
+    weekday_summary = weekday_pattern.groupby("weekday")["_pmc"].mean().reindex(
         ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     )
 
     hourly_pattern = cleaned.copy()
     hourly_pattern["hour"] = hourly_pattern.index.hour
-    hourly_summary = hourly_pattern.groupby("hour")["pm25"].mean()
+    hourly_pattern["_pmc"] = hourly_pattern[_pmc_col].fillna(hourly_pattern["pm25"])
+    hourly_summary = hourly_pattern.groupby("hour")["_pmc"].mean()
     # Ensure all 24 hours are present (0-23), even if no data for some hours
     hourly_summary = hourly_summary.reindex(range(24), fill_value=np.nan)
 
     heatmap = cleaned.copy()
     heatmap["day"] = heatmap.index.day_name()
     heatmap["hour"] = heatmap.index.hour
-    heatmap_summary = heatmap.pivot_table(values="pm25", index="day", columns="hour", aggfunc="mean")
+    heatmap["_pmc"] = heatmap[_pmc_col].fillna(heatmap["pm25"])
+    heatmap_summary = heatmap.pivot_table(values="_pmc", index="day", columns="hour", aggfunc="mean")
     heatmap_summary = heatmap_summary.reindex(index=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]) 
 
     aqi_dist = cleaned["aqi_category"].value_counts()
@@ -3542,9 +4792,15 @@ def analyze_dataset(
     # Narrative summary
     _pm_corr_avg = round(float(cleaned["pm25_corrected"].mean()), 2) if "pm25_corrected" in cleaned and not cleaned.empty else None
     _pm_raw_avg  = round(float(cleaned["pm25"].mean()), 2) if not cleaned.empty else 0.0
-    _aqi_avg     = int(cleaned["aqi"].mean()) if not cleaned.empty else 0
-    _aqi_cat     = cleaned["aqi_category"].iloc[-1] if not cleaned.empty else "Unknown"
-    _aqi_current = int(cleaned["aqi"].iloc[-1]) if not cleaned.empty else 0
+    # AQI average: EPA defines AQI from a time-averaged concentration, not by averaging per-reading AQIs.
+    # We derive the average AQI from the period-mean corrected PM2.5 (most reproducible and defensible).
+    _aqi_avg_pm  = _pm_corr_avg if _pm_corr_avg is not None else _pm_raw_avg
+    _aqi_avg_v, _aqi_avg_cat_v, _ = calc_aqi_value(float(_aqi_avg_pm)) if _aqi_avg_pm is not None else (0, "Unknown", "#9E9E9E")
+    _aqi_avg     = _aqi_avg_v
+    _aqi_cat     = _aqi_avg_cat_v
+    # Current AQI: derived from the last reading's corrected PM2.5 (instantaneous)
+    _last_pm     = float(cleaned["pm25_corrected"].fillna(cleaned["pm25"]).iloc[-1]) if not cleaned.empty else 0.0
+    _aqi_current, _, _ = calc_aqi_value(_last_pm) if not cleaned.empty else (0, "Unknown", "#9E9E9E")
     _cv          = channel_agreement.get("cv_between_channels")
     _n_days      = max(1, int((cleaned.index.max() - cleaned.index.min()).total_seconds() / 86400)) if not cleaned.empty else 0
     _narrative   = build_narrative_summary(
@@ -3561,14 +4817,16 @@ def analyze_dataset(
 
     result = {
         "summary": {
-            "aqi_current": int(cleaned["aqi"].iloc[-1]) if not cleaned.empty else 0,
-            "aqi_average": int(cleaned["aqi"].mean()) if not cleaned.empty else 0,
-            "aqi_category": cleaned["aqi_category"].iloc[-1] if not cleaned.empty else "Unknown",
-            "aqi_color": cleaned["aqi_color"].iloc[-1] if not cleaned.empty else "#9E9E9E",
+            "aqi_current": _aqi_current,
+            "aqi_average": _aqi_avg,
+            "aqi_category": _aqi_cat,
+            "aqi_color": calc_aqi_value(float(_aqi_avg_pm))[2] if _aqi_avg_pm is not None else "#9E9E9E",
             "pm25_average": round(float(cleaned["pm25"].mean()), 2) if not cleaned.empty else 0.0,
             "pm25_average_epa_corrected": round(float(cleaned["pm25_corrected"].mean()), 2) if "pm25_corrected" in cleaned and not cleaned.empty else None,
+            "epa_correction_applied": bool(_correction_applied),
+            "rh_coverage_pct": round(_rh_coverage * 100, 1),
             "quality_score": round(float(quality_score), 1),
-            "quality_score_formula": "Q = (0.7×Internal Integrity) + (0.3×Temporal Completeness)",  # IMPROVEMENT 4: Standardized formula
+            "quality_score_formula": "Q = (0.4 × Validity) + (0.6 × Coverage)",
             "validity_score": round(float(validity_score), 1),
             "coverage_score": round(float(coverage_score), 1),
             # IMPROVEMENT 3: Dynamic Narrative Engine - Add context about gaps
@@ -3576,7 +4834,10 @@ def analyze_dataset(
                 f"Score primarily impacted by a contiguous {max_gap_days}-day network/power outage; "
                 f"internal data integrity remains {round(float(validity_score), 1)}% valid."
                 if coverage_score < 90 and max_gap_days > 0
-                else "Data quality limited by temporal gaps; see coverage score for details."
+                else f"Excellent data quality — {round(float(coverage_score), 1)}% temporal coverage with {round(float(validity_score), 1)}% valid readings. Suitable for peer-reviewed publication and regulatory submission."
+                if quality_score >= 90
+                else f"Acceptable data quality (score {round(float(quality_score), 1)}/100). "
+                     f"Coverage: {round(float(coverage_score), 1)}%, Validity: {round(float(validity_score), 1)}%."
             ),
             "channel_agreement_pct": channel_agreement.get("agreement_pct", None),
             "sensor_health_cv": channel_agreement.get("cv_between_channels", None),
@@ -3592,6 +4853,10 @@ def analyze_dataset(
             "pm25_max": round(_pm25_max, 2),
             "narrative_summary": _narrative,
             "tz_label": _tz_label,
+            "humidity_used": bool("humidity" in cleaned and cleaned["humidity"].between(*HUMID_RANGE).any()),
+            "mean_rh": (round(float(cleaned.loc[cleaned["humidity"].between(*HUMID_RANGE), "humidity"].mean()), 1) if ("humidity" in cleaned and cleaned["humidity"].between(*HUMID_RANGE).any()) else None),
+            "rh_min": (round(float(cleaned.loc[cleaned["humidity"].between(*HUMID_RANGE), "humidity"].min()), 1) if ("humidity" in cleaned and cleaned["humidity"].between(*HUMID_RANGE).any()) else None),
+            "rh_max": (round(float(cleaned.loc[cleaned["humidity"].between(*HUMID_RANGE), "humidity"].max()), 1) if ("humidity" in cleaned and cleaned["humidity"].between(*HUMID_RANGE).any()) else None),
         },
         "detected": {
             "pm25": _serialize_detected(pm_primary, pm_a, pm_b),
@@ -3602,6 +4867,7 @@ def analyze_dataset(
             "latitude": _serialize_detected(lat_primary, None, None),
             "longitude": _serialize_detected(lon_primary, None, None),
         },
+        "data_completeness": data_completeness,
         "charts": {
             "timeseries": {
                 # JHU/MIT STANDARD: Enforce physical gaps using asfreq ('2T')
@@ -3751,7 +5017,12 @@ def analyze_dataset(
         decomposition_df,
         rolling_1h_timestamps=pm25_raw_for_1h.index,
         rolling_1h_values=rolling_1h_series,
+        tz_label=_tz_label,
+        heatmap_summary=heatmap_summary,
     )
+    # Persist figure title→filename for community report regeneration
+    result["_pdf_params"]["figures"] = [(title, path.name) for title, path in report_figures]
+
     report_pdf_path = output_dir / "report.pdf"
     build_report_pdf(report_pdf_path, result["summary"], quality_rows, anomalies, report_figures, channel_agreement, gap_analysis, radar_profile, metadata=metadata, tz_label=_tz_label, highest_events=_highest_events_rows)
     public_report_path = output_dir / "community_report.pdf"
@@ -3763,6 +5034,8 @@ def analyze_dataset(
         anomalies,
         channel_agreement,
         report_figures,
+        exceedances=exceedances,
+        metadata=metadata,
     )
     outputs = _write_outputs(
         output_dir,

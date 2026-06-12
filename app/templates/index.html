@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
     <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260608e" />
   </head>
   <body>
     <div class="app">
@@ -25,6 +25,7 @@
           <h2>Data Import</h2>
 
           <div class="device-info-section">
+            <span class="import-group-label">Report details — optional</span>
             <div class="device-info-row">
               <div class="input-group-inline">
                 <label for="device-id-input">Device ID</label>
@@ -116,15 +117,16 @@
             <p class="meta" style="margin-top:4px;">All analysis, charts, and PDF report will use this timezone for daily grouping and timestamps.</p>
           </div>
 
+          <span class="import-group-label" style="margin-top:18px;">Upload data</span>
           <div id="dropzone" class="dropzone">
-            <p>Drop 1 PurpleAir CSV/XLSX file here</p>
+            <p>Drop a PurpleAir CSV or XLSX file here</p>
             <span>or</span>
             <label class="btn">
               Choose File
               <input id="file-input" type="file" accept=".csv,.xlsx" />
             </label>
           </div>
-          <p class="meta">CSV or XLSX format. Dual sensor setup automatically detected.</p>
+          <p class="meta">One file per analysis. Dual-sensor setups are detected automatically. To compare multiple houses, run one analysis first, then use the <strong>Compare Houses</strong> panel.</p>
           <div id="loading" class="loading hidden">
             <div class="spinner"></div>
             <p>Analyzing data and building your dashboard...</p>
@@ -134,20 +136,21 @@
 
       <main id="dashboard" class="dashboard hidden">
         <section id="comparison-section" class="section comparison hidden">
-          <h2>Compare Files</h2>
-          <p class="section-note">Add files one by one (2–10 files from any folder), then press Compare.</p>
+          <h2>Compare Houses</h2>
+          <p class="section-note">Add a <strong>Control House</strong> (your reference/baseline), then add the other houses (up to 9 more). Name each one, then press Compare to see 1-hour and 24-hour median PM2.5 trends side by side.</p>
 
           <div class="window-panel">
             <div class="compare-file-list" id="compare-file-list">
-              <p class="group-note" id="compare-empty-note">No files added yet. Click "Add File" to begin.</p>
+              <p class="group-note" id="compare-empty-note">No houses added yet. Add the Control House first, then the others.</p>
             </div>
             <div class="compare-controls">
-              <button type="button" class="btn secondary" id="compare-add-btn">+ Add File</button>
+              <button type="button" class="btn primary" id="compare-add-control-btn">+ Control House</button>
+              <button type="button" class="btn secondary" id="compare-add-btn">+ Add House</button>
               <input id="compare-file-picker" type="file" accept=".csv,.xlsx" style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none;" tabindex="-1" />
               <button id="compare-run" class="btn primary" type="button" disabled>Compare</button>
               <button id="compare-clear" class="btn ghost" type="button" style="display:none">Clear All</button>
             </div>
-            <p id="compare-selection" class="group-note">0 / 10 files selected.</p>
+            <p id="compare-selection" class="group-note">0 / 10 houses selected.</p>
           </div>
 
           <div id="comparison-results" class="hidden" style="margin-top: 18px;">
@@ -164,6 +167,33 @@
               </div>
               <div class="chart" id="chart-compare-timeseries"></div>
             </div>
+
+            <div class="chart-container" id="compare-24h-container" style="margin-top: 18px;">
+              <div class="chart-header">
+                <h3>24-Hour Median PM2.5 — House Comparison</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon download-hd" data-chart="compare-median-24h">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-compare-median-24h"></div>
+              <p class="section-note" style="padding:8px 12px;">24-hour rolling median smooths out short spikes to reveal each house's underlying daily pollution level. The <strong>Control House</strong> is drawn as a bold dark line for reference.</p>
+            </div>
+
+            <div class="chart-container" id="compare-1h-container" style="margin-top: 18px;">
+              <div class="chart-header">
+                <h3>1-Hour Median PM2.5 — House Comparison</h3>
+                <div class="chart-controls">
+                  <button class="btn-icon download-hd" data-chart="compare-median-1h">
+                    <span>📥 HD</span>
+                  </button>
+                </div>
+              </div>
+              <div class="chart" id="chart-compare-median-1h"></div>
+              <p class="section-note" style="padding:8px 12px;">1-hour rolling median shows finer detail — short episodes and intra-day variation between houses. The <strong>Control House</strong> is highlighted in bold.</p>
+            </div>
+
             <div id="year-overlay-container" class="chart-container hidden" style="margin-top: 18px;">
               <div class="chart-header">
                 <h3>Multi-Year PM2.5 Overlay (Day-of-Year)</h3>
@@ -176,9 +206,12 @@
               <div class="chart" id="chart-year-overlay"></div>
               <p class="section-note" style="padding:8px 12px;">Each line represents one year. X-axis = day of year (1–365), allowing direct year-over-year comparison at the same location.</p>
             </div>
-            <div style="margin-top: 14px;">
+            <div style="margin-top: 14px; display:flex; gap:10px; flex-wrap:wrap;">
               <button id="compare-download-report" class="btn primary" type="button">
                 📄 Download Comparison Report (PDF)
+              </button>
+              <button id="compare-download-community" class="btn secondary" type="button">
+                🏡 Community Report + Comparison (PDF)
               </button>
             </div>
           </div>
@@ -202,8 +235,8 @@
           <div class="methodology-grid">
             <div class="methodology-card">
               <h3>1. Quality Score (JHU/MIT Standard)</h3>
-              <p>Formula: <strong>QS = 0.7×Validity + 0.3×Coverage</strong></p>
-              <p class="small">Prioritizes data integrity (70%) over temporal completeness (30%). Balances poor-quality readings with datasets containing gaps.</p>
+              <p>Formula: <strong>QS = 0.4×Validity + 0.6×Coverage</strong></p>
+              <p class="small">Weights temporal completeness (60%) and reading validity (40%) so that both silent gaps and bad readings reduce the score.</p>
             </div>
             <div class="methodology-card">
               <h3>2. Sensor Health Index (CV)</h3>
@@ -246,7 +279,10 @@
         </section>
 
         <section class="section detected">
-          <h2>Detected columns</h2>
+          <h2>Data Completeness &amp; Inputs</h2>
+          <p class="section-note">What the uploaded file contains, and the impact of anything important that is missing.</p>
+          <div id="data-completeness"></div>
+          <h3 style="margin-top:22px;">Detected columns</h3>
           <div id="detected-columns" class="detected-grid"></div>
         </section>
 
@@ -255,7 +291,7 @@
           <div class="chart-grid">
             <div class="chart-container chart-full-width">
               <div class="chart-header">
-                <h3>AQI Calendar — Daily Air Quality</h3>
+                <h3>PM2.5 Daily Mean — Calendar (WHO 15 / EPA 35)</h3>
                 <div class="chart-controls">
                   <button class="btn-icon download-hd" data-chart="calendar">
                     <span>📥 HD</span>
@@ -286,24 +322,20 @@
             
             <div class="chart-container">
               <div class="chart-header">
-                <h3>Air Quality Index</h3>
+                <h3>PM2.5 Concentration Distribution</h3>
                 <div class="chart-controls">
-                  <button class="btn-icon info-icon" title="Learn more" data-chart="aqi">
-                    <span>ℹ️</span>
-                  </button>
-                  <button class="btn-icon download-hd" data-chart="aqi">
+                  <button class="btn-icon download-hd" data-chart="distribution">
                     <span>📥 HD</span>
                   </button>
                 </div>
               </div>
-              <div class="chart" id="chart-aqi"></div>
-              <div class="chart-description" id="desc-aqi"></div>
-              <div class="chart-tooltip" id="tooltip-aqi" style="display: none;"></div>
+              <div class="chart" id="chart-distribution"></div>
+              <div class="chart-description" id="desc-distribution"></div>
             </div>
             
             <div class="chart-container">
               <div class="chart-header">
-                <h3>Diurnal Cycle</h3>
+                <h3>Diurnal Cycle — Mean &amp; 10th–90th Percentile</h3>
                 <div class="chart-controls">
                   <button class="btn-icon info-icon" title="Learn more" data-chart="hourly">
                     <span>ℹ️</span>
@@ -351,8 +383,7 @@
               <div class="chart-description" id="desc-channel"></div>
               <div class="chart-tooltip" id="tooltip-channel" style="display: none;"></div>
             </div>
-            </div>
-            
+
             <div class="chart-container">
               <div class="chart-header">
                 <h3>Sensor Drift Detection</h3>
@@ -369,42 +400,6 @@
               <div class="chart-date-range" id="range-humidity"></div>
               <div class="chart-description" id="desc-humidity"></div>
               <div class="chart-tooltip" id="tooltip-humidity" style="display: none;"></div>
-            </div>
-            
-            <div class="chart-container">
-              <div class="chart-header">
-                <h3>Data Quality Radar</h3>
-                <div class="chart-controls">
-                  <button class="btn-icon info-icon" title="Learn more" data-chart="aqi-dist">
-                    <span>ℹ️</span>
-                  </button>
-                  <button class="btn-icon download-hd" data-chart="aqi-dist">
-                    <span>📥 HD</span>
-                  </button>
-                </div>
-              </div>
-              <div class="chart" id="chart-aqi-dist"></div>
-              <div class="chart-date-range" id="range-aqi-dist"></div>
-              <div class="chart-description" id="desc-aqi-dist"></div>
-              <div class="chart-tooltip" id="tooltip-aqi-dist" style="display: none;"></div>
-            </div>
-            
-            <div class="chart-container">
-              <div class="chart-header">
-                <h3>24-Hour Temporal Pattern</h3>
-                <div class="chart-controls">
-                  <button class="btn-icon info-icon" title="Learn more" data-chart="quality">
-                    <span>ℹ️</span>
-                  </button>
-                  <button class="btn-icon download-hd" data-chart="quality">
-                    <span>📥 HD</span>
-                  </button>
-                </div>
-              </div>
-              <div class="chart" id="chart-quality"></div>
-              <div class="chart-date-range" id="range-quality"></div>
-              <div class="chart-description" id="desc-quality"></div>
-              <div class="chart-tooltip" id="tooltip-quality" style="display: none;"></div>
             </div>
           </div>
         </section>
@@ -486,21 +481,48 @@
 
         <section class="section downloads">
           <h2>Reports and Data</h2>
-          
+
+          <!-- Community / Residents Report — separate prominent card -->
+          <div class="community-report-card" id="community-report-card" style="display:none;">
+            <div class="community-report-inner">
+              <div class="community-report-icon">🏡</div>
+              <div class="community-report-text">
+                <h3>Community Air Quality Report</h3>
+                <p>A plain-language, professionally designed PDF for residents and research participants — no jargon. Includes PM2.5 trends, daily results, health context, and practical guidance.</p>
+              </div>
+            </div>
+            <div class="community-report-meta" id="community-report-meta">
+              <div class="community-meta-row">
+                <div class="community-meta-field">
+                  <label for="cr-device-id">Device ID <span class="meta-hint">(appears in report header)</span></label>
+                  <input type="text" id="cr-device-id" class="cr-input" placeholder="e.g. PurpleAir #291796" maxlength="80" />
+                </div>
+                <div class="community-meta-field">
+                  <label for="cr-location">Location <span class="meta-hint">(appears in report header)</span></label>
+                  <input type="text" id="cr-location" class="cr-input" placeholder="e.g. Rooftop — Main St, Chicago" maxlength="120" />
+                </div>
+                <button id="btn-community-report" class="btn community-btn" type="button">
+                  Download Report
+                </button>
+              </div>
+              <p class="cr-hint">Fill in Device ID and Location to have them printed in the report header. Leave blank to omit.</p>
+            </div>
+          </div>
+
           <div class="download-sections">
             <div class="download-section">
               <h3>Research Report</h3>
               <p>Complete analysis with full methodology, statistical analysis, and quality assessment. Suitable for peer-reviewed publication and regulatory submission.</p>
               <div id="download-buttons-research" class="download-grid"></div>
             </div>
-            
+
             <div class="download-section">
               <h3>Data Exports</h3>
               <p>CSV and JSON formatted data products for further analysis, including quality flags, EPA corrections, and statistical summaries.</p>
               <div id="download-buttons-public" class="download-grid"></div>
             </div>
           </div>
-          
+
           <div class="chart-export-section">
             <h3>Chart Downloads</h3>
             <p>Export individual visualizations as high-resolution PNG files for presentations and publications.</p>
@@ -515,7 +537,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260608e"></script>
 
     <footer class="site-footer">
       <div class="footer-inner">

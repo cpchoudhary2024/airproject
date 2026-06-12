@@ -17,6 +17,7 @@ const compareRunButton = document.getElementById('compare-run');
 const compareSelection = document.getElementById('compare-selection');
 const compareFilePicker = document.getElementById('compare-file-picker');
 const compareAddBtn = document.getElementById('compare-add-btn');
+const compareAddControlBtn = document.getElementById('compare-add-control-btn');
 const compareFileList = document.getElementById('compare-file-list');
 const compareClearBtn = document.getElementById('compare-clear');
 const compareDownloadReportBtn = document.getElementById('compare-download-report');
@@ -26,9 +27,32 @@ const narrativeText = document.getElementById('narrative-text');
 const narrativeSummary = document.getElementById('narrative-summary');
 const correctionSelect = document.getElementById('correction-select');
 
-// State for comparison file list (one-by-one selection, max 10)
+// State for comparison house list (one-by-one selection, max 10).
+// Each entry: { file: File, label: string, isControl: boolean }
 let compareFiles = [];
-let compareFileIds = [];  // file_ids returned from server after comparison runs
+let compareFileIds = [];  // file_ids returned from server after comparison runs (control-first order)
+let compareLabels = [];   // display labels aligned with compareFileIds (control-first order)
+let _pendingControl = false;  // true while the next picked file should become the Control House
+
+// Timezone applied to the current analysis (IANA name or 'UTC'). All chart
+// timestamps from the backend are already converted to this zone, so axis
+// labels must reflect it rather than hard-coding 'UTC'.
+let currentTzLabel = 'UTC';
+function _tzIsUtc() { return !currentTzLabel || currentTzLabel === 'UTC'; }
+// Short, human-friendly zone name for axis titles, e.g. 'New York', 'Kolkata'.
+function _tzShort() {
+  if (_tzIsUtc()) return 'UTC';
+  return currentTzLabel.split('/').pop().replace(/_/g, ' ');
+}
+// "Date/Time (UTC)" vs "Date/Time (New York local time)"
+function _tzDateAxis() {
+  return _tzIsUtc() ? 'Date/Time (UTC)' : `Date/Time (${_tzShort()} local time)`;
+}
+// "Hour of Day (UTC)" vs "Hour of Day (New York local time)"
+function _tzHourAxis() {
+  return _tzIsUtc() ? 'Hour of Day (UTC)' : `Hour of Day (${_tzShort()} local time)`;
+}
+function _tzHourTag() { return _tzIsUtc() ? 'UTC' : _tzShort(); }
 
 // State for custom notes and current analysis
 let customNotes = [];   // [{heading, content}, ...]
@@ -195,6 +219,49 @@ function buildOverviewCards(summary) {
   }
 }
 
+function buildDataCompleteness(dc) {
+  const el = document.getElementById('data-completeness');
+  if (!el) return;
+  if (!dc || !Array.isArray(dc.items)) { el.innerHTML = ''; return; }
+
+  const levelRank = { required: 0, important: 1, recommended: 2, optional: 3 };
+  const items = [...dc.items].sort((a, b) =>
+    (a.present === b.present ? 0 : a.present ? 1 : -1) ||
+    (levelRank[a.level] ?? 9) - (levelRank[b.level] ?? 9));
+
+  // Banner when an important/required input is missing
+  let banner = '';
+  if (dc.missing_important && dc.missing_important.length) {
+    banner = `<div class="dc-banner warn">⚠ This file is missing ${dc.missing_important.length} important input(s): `
+      + `<strong>${dc.missing_important.map(escapeHtmlSafe).join(', ')}</strong>. See impact below.</div>`;
+  } else {
+    banner = `<div class="dc-banner ok">✓ All required and important inputs are present.</div>`;
+  }
+
+  const rows = items.map(it => {
+    const ok = !!it.present;
+    const icon = ok ? '✓' : (it.level === 'optional' ? '–' : '✗');
+    const cls = ok ? 'present' : (it.level === 'required' || it.level === 'important' ? 'missing' : 'absent');
+    const found = ok && it.found ? `<span class="dc-found">${escapeHtmlSafe(it.found)}</span>` : '';
+    return `
+      <div class="dc-row ${cls}">
+        <span class="dc-icon">${icon}</span>
+        <div class="dc-main">
+          <div class="dc-name">${escapeHtmlSafe(it.name)} <span class="dc-level ${it.level}">${it.level}</span> ${found}</div>
+          ${ok ? '' : `<div class="dc-impact">${escapeHtmlSafe(it.impact)}</div>`}
+        </div>
+        <span class="dc-status ${cls}">${ok ? 'Present' : 'Missing'}</span>
+      </div>`;
+  }).join('');
+
+  el.innerHTML = banner + `<div class="dc-list">${rows}</div>`;
+}
+
+function escapeHtmlSafe(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function buildDetectedColumns(detected) {
   if (!detectedColumns) {
     console.error('Detected columns container not found');
@@ -279,15 +346,68 @@ function buildTable(rows) {
 
 function buildDownloads(fileId, outputs) {
   const downloadResearch = document.getElementById('download-buttons-research');
-  const downloadPublic = document.getElementById('download-buttons-public');
-  
+  const downloadPublic   = document.getElementById('download-buttons-public');
+
   if (!downloadResearch || !downloadPublic) {
     console.error('Download containers not found');
     return;
   }
-  
+
   downloadResearch.innerHTML = '';
-  downloadPublic.innerHTML = '';
+  downloadPublic.innerHTML   = '';
+
+  // ── Community Report card ────────────────────────────────────────────────
+  const communityCard = document.getElementById('community-report-card');
+  if (communityCard) {
+    const hasReport = !!(outputs.research_report_pdf || outputs.report_pdf || outputs.public_report_pdf);
+    communityCard.style.display = hasReport ? 'block' : 'none';
+
+    if (hasReport) {
+      // Pre-fill cr-inputs from the main upload form so the user sees their values
+      const crDeviceEl  = document.getElementById('cr-device-id');
+      const crLocationEl = document.getElementById('cr-location');
+      if (crDeviceEl && deviceIdInput && deviceIdInput.value.trim() && !crDeviceEl.value.trim()) {
+        crDeviceEl.value = deviceIdInput.value.trim();
+      }
+      if (crLocationEl && locationInput && locationInput.value.trim() && !crLocationEl.value.trim()) {
+        crLocationEl.value = locationInput.value.trim();
+      }
+
+      // Wire button — replace to clear any old listener
+      const oldBtn = document.getElementById('btn-community-report');
+      if (oldBtn) {
+        const btn = oldBtn.cloneNode(true);
+        oldBtn.parentNode.replaceChild(btn, oldBtn);
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          btn.textContent = 'Generating…';
+          try {
+            const crDeviceId = (document.getElementById('cr-device-id')?.value || '').trim();
+            const crLocation  = (document.getElementById('cr-location')?.value  || '').trim();
+            // Always regenerate via POST so device_id/location are embedded fresh
+            const fd = new FormData();
+            fd.append('device_id', crDeviceId);
+            fd.append('location',  crLocation);
+            const resp = await fetch(`/api/community_report/${fileId}`, { method: 'POST', body: fd });
+            if (!resp.ok) throw new Error('generation failed');
+            const blob = await resp.blob();
+            const url  = URL.createObjectURL(blob);
+            const a    = document.createElement('a');
+            a.href = url;
+            a.download = `community_air_quality_report_${new Date().toISOString().split('T')[0]}.pdf`;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          } catch (e) {
+            alert('Could not generate the community report. Please try again.');
+          } finally {
+            btn.disabled = false;
+            btn.textContent = 'Download Report';
+          }
+        });
+      }
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
   
   // Research report — POST with custom notes so they are embedded in the PDF
   if (outputs.research_report_pdf || outputs.report_pdf) {
@@ -372,11 +492,11 @@ function buildChartDownloads() {
     try {
       const chartsToExport = [
         { id: 'chart-timeseries', label: 'PM2.5 Temporal Trend' },
-        { id: 'chart-aqi', label: 'Air Quality Index' },
+        { id: 'chart-distribution', label: 'PM2.5 Concentration Distribution' },
         { id: 'chart-hourly', label: 'Diurnal Cycle' },
-        { id: 'chart-channel', label: 'Sensor Comparison' },
-        { id: 'chart-heatmap', label: 'Hourly Heatmap' },
-        { id: 'chart-quality', label: 'Data Quality Radar' },
+        { id: 'chart-channel', label: 'Dual Sensor Comparison' },
+        { id: 'chart-heatmap', label: 'Rolling Medians' },
+        { id: 'chart-humidity', label: 'Sensor Drift' },
       ];
       
       let htmlContent = `
@@ -465,13 +585,10 @@ function populateChartDescriptions(chartDescriptions, dateRange) {
   // Map of chart IDs to description keys
   const chartMappings = {
     'timeseries': 'timeseries',
-    'aqi': 'aqi_gauge',
     'hourly': 'hourly_pattern',
     'heatmap': 'rolling_median',
     'channel': 'channel_comparison',
     'humidity': 'sensor_drift',
-    'aqi-dist': 'radar_pattern',
-    'quality': 'pm25_temporal_radar',
   };
   
   // Populate each chart with description
@@ -538,8 +655,8 @@ function renderCharts(charts) {
 
     // Chart container validation (chart-map excluded — removed as always-empty placeholder)
     const chartContainers = [
-      'chart-timeseries', 'chart-aqi', 'chart-hourly', 'chart-heatmap',
-      'chart-channel', 'chart-humidity', 'chart-aqi-dist', 'chart-quality'
+      'chart-timeseries', 'chart-distribution', 'chart-hourly', 'chart-heatmap',
+      'chart-channel', 'chart-humidity'
     ];
     const missingCharts = chartContainers.filter(id => !document.getElementById(id));
     if (missingCharts.length > 0) {
@@ -594,74 +711,107 @@ function renderCharts(charts) {
       {
         ...chartLayouts.base,
         title: 'PM2.5 Temporal Trend',
-        xaxis: { title: 'Date/Time (UTC)', ...chartLayouts.base.xaxis },
+        xaxis: { title: _tzDateAxis(), ...chartLayouts.base.xaxis },
         yaxis: { title: 'PM2.5 Concentration (µg/m³)', ...chartLayouts.base.yaxis },
       },
       chartConfig
     );
     console.log('✓ Timeseries rendered');
 
-    // Chart 2: AQI Gauge
-    console.log('Rendering AQI gauge...');
-    Plotly.newPlot(
-      'chart-aqi',
-      [
-        {
-          type: 'indicator',
-          mode: 'gauge+number+delta',
-          value: charts.aqi_gauge.value,
-          title: { text: 'Air Quality Index' },
-          gauge: {
-            axis: { range: [0, 500] },
-            bar: { color: charts.aqi_gauge.color },
-            steps: [
-              { range: [0, 50], color: '#E8F5E9' },
-              { range: [51, 100], color: '#FFF9C4' },
-              { range: [101, 150], color: '#FFE0B2' },
-              { range: [151, 200], color: '#FFCCBC' },
-              { range: [201, 300], color: '#F3E5F5' },
-              { range: [301, 500], color: '#FCE4EC' },
+    // Chart 2: PM2.5 Concentration Distribution (exposure histogram)
+    console.log('Rendering PM2.5 distribution...');
+    {
+      const vals = (charts.timeseries.pm25_corrected || charts.timeseries.pm25 || [])
+        .filter(v => v !== null && v !== undefined && isFinite(v) && v >= 0);
+      const distEl = document.getElementById('chart-distribution');
+      if (vals.length > 0 && distEl) {
+        const pctBelowWho = (100 * vals.filter(v => v <= 15).length / vals.length).toFixed(1);
+        const pctBelowEpa = (100 * vals.filter(v => v <= 35).length / vals.length).toFixed(1);
+        Plotly.newPlot(
+          'chart-distribution',
+          [
+            {
+              x: vals,
+              type: 'histogram',
+              histnorm: 'percent',
+              marker: { color: '#1f7a8c', line: { color: '#fff', width: 0.5 } },
+              opacity: 0.85,
+              name: '% of readings',
+              hovertemplate: 'PM2.5 %{x} µg/m³<br>%{y:.1f}% of readings<extra></extra>',
+            },
+          ],
+          {
+            ...chartLayouts.base,
+            title: `PM2.5 Concentration Distribution — ${pctBelowWho}% ≤ WHO 15, ${pctBelowEpa}% ≤ EPA 35`,
+            bargap: 0.02,
+            xaxis: { title: 'PM2.5 (µg/m³, EPA-corrected)', ...chartLayouts.base.xaxis },
+            yaxis: { title: '% of readings', ...chartLayouts.base.yaxis },
+            shapes: [
+              { type: 'line', x0: 15, x1: 15, yref: 'paper', y0: 0, y1: 1, line: { color: '#00a651', width: 1.5, dash: 'dash' } },
+              { type: 'line', x0: 35, x1: 35, yref: 'paper', y0: 0, y1: 1, line: { color: '#f6aa1c', width: 1.5, dash: 'dot' } },
             ],
-            threshold: {
-              line: { color: 'red', width: 4 },
-              thickness: 0.75,
-              value: 150
-            }
+            annotations: [
+              { x: 15, yref: 'paper', y: 1.02, text: 'WHO 15', showarrow: false, font: { size: 10, color: '#00a651' } },
+              { x: 35, yref: 'paper', y: 1.02, text: 'EPA 35', showarrow: false, font: { size: 10, color: '#f6aa1c' } },
+            ],
           },
-          number: { font: { size: 24 } },
-        },
-      ],
-      {
-        ...chartLayouts.base,
-        margin: { t: 20, r: 20, b: 20, l: 20 },
-      },
-      chartConfig
-    );
-    console.log('✓ AQI gauge rendered');
+          chartConfig
+        );
+      } else if (distEl) {
+        distEl.innerHTML = '<p class="empty">No PM2.5 data available for distribution.</p>';
+      }
+    }
+    console.log('✓ Distribution rendered');
 
-    // Chart 3: Hourly pattern
-    console.log('Rendering hourly pattern...');
-    Plotly.newPlot(
-      'chart-hourly',
-      [
-        {
-          x: charts.hourly_pattern.hours,
-          y: charts.hourly_pattern.values,
-          type: 'bar',
-          marker: { color: '#1f7a8c' },
+    // Chart 3: Diurnal Cycle — mean line with 10th–90th percentile band
+    console.log('Rendering diurnal cycle...');
+    {
+      const dp = charts.diurnal_pattern;
+      const hourlyEl = document.getElementById('chart-hourly');
+      if (dp && dp.hours && dp.mean && hourlyEl) {
+        const hrs = dp.hours;
+        const traces = [];
+        // Percentile band (p90 upper, p10 lower) drawn as a filled area
+        if (dp.p90 && dp.p10) {
+          traces.push({
+            x: hrs, y: dp.p90, mode: 'lines', line: { width: 0 },
+            name: '90th pct', hoverinfo: 'skip', showlegend: false,
+          });
+          traces.push({
+            x: hrs, y: dp.p10, mode: 'lines', line: { width: 0 },
+            fill: 'tonexty', fillcolor: 'rgba(31,122,140,0.15)',
+            name: '10th–90th percentile', hoverinfo: 'skip',
+          });
+        }
+        traces.push({
+          x: hrs, y: dp.mean, mode: 'lines+markers',
+          line: { color: '#1f7a8c', width: 2.2 },
+          marker: { size: 4, color: '#1f7a8c' },
           name: 'Mean PM2.5',
-          hovertemplate: 'Hour %{x}:00 UTC<br>PM2.5: %{y:.1f} µg/m³<extra></extra>',
-        },
-      ],
-      {
-        ...chartLayouts.base,
-        title: 'Diurnal Cycle',
-        xaxis: { title: 'Hour of Day (UTC)', ...chartLayouts.base.xaxis },
-        yaxis: { title: 'PM2.5 (µg/m³)', ...chartLayouts.base.yaxis },
-      },
-      chartConfig
-    );
-    console.log('✓ Hourly pattern rendered');
+          hovertemplate: `Hour %{x}:00 ${_tzHourTag()}<br>Mean: %{y:.1f} µg/m³<extra></extra>`,
+        });
+        Plotly.newPlot(
+          'chart-hourly',
+          traces,
+          {
+            ...chartLayouts.base,
+            title: 'Diurnal Cycle — Typical PM2.5 by Hour of Day',
+            xaxis: { title: _tzHourAxis(), dtick: 3, ...chartLayouts.base.xaxis },
+            yaxis: { title: 'PM2.5 (µg/m³)', rangemode: 'tozero', ...chartLayouts.base.yaxis },
+            shapes: [
+              { type: 'line', xref: 'paper', x0: 0, x1: 1, y0: 15, y1: 15, line: { color: '#00a651', width: 1, dash: 'dash' } },
+            ],
+            annotations: [
+              { xref: 'paper', x: 1, y: 15, text: 'WHO 15', showarrow: false, xanchor: 'left', font: { size: 10, color: '#00a651' } },
+            ],
+          },
+          chartConfig
+        );
+      } else if (hourlyEl) {
+        hourlyEl.innerHTML = '<p class="empty">No diurnal pattern data available.</p>';
+      }
+    }
+    console.log('✓ Diurnal cycle rendered');
 
     // Chart 4: Rolling Medians (1h + 24h + 7d)
     console.log('Rendering rolling medians...');
@@ -711,7 +861,7 @@ function renderCharts(charts) {
         {
           ...chartLayouts.base,
           title: 'Rolling Medians — 1h · 24h · 7d Smoothed Trend',
-          xaxis: { title: 'Date/Time (UTC)', ...chartLayouts.base.xaxis },
+          xaxis: { title: _tzDateAxis(), ...chartLayouts.base.xaxis },
           yaxis: { title: 'PM2.5 Concentration (µg/m³)', ...chartLayouts.base.yaxis },
         },
         chartConfig
@@ -778,7 +928,7 @@ function renderCharts(charts) {
         {
           ...chartLayouts.base,
           title: 'Sensor Drift Detection (Channel A - Channel B)',
-          xaxis: { title: 'Date/Time (UTC)', ...chartLayouts.base.xaxis },
+          xaxis: { title: _tzDateAxis(), ...chartLayouts.base.xaxis },
           yaxis: { title: 'Difference (µg/m³)', ...chartLayouts.base.yaxis },
         },
         chartConfig
@@ -788,77 +938,10 @@ function renderCharts(charts) {
     }
     console.log('✓ Sensor drift rendered');
 
-    // Chart 7: Data Quality Profile Radar
-    console.log('Rendering quality radar...');
-    if (charts.radar_pattern) {
-      const radarData = charts.radar_pattern;
-      Plotly.newPlot(
-        'chart-aqi-dist',
-        [
-          {
-            type: 'scatterpolar',
-            r: radarData.values || [],
-            theta: radarData.labels || [],
-            fill: 'toself',
-            name: 'Quality Metrics',
-            line: { color: '#1f7a8c' },
-            fillcolor: 'rgba(31, 122, 140, 0.3)',
-            hovertemplate: '<b>%{theta}</b><br>Score: %{r:.1f}%<extra></extra>',
-          },
-        ],
-        {
-          polar: {
-            radialaxis: { visible: true, range: [0, 100] }
-          },
-          title: 'Data Quality Profile (Multi-Dimensional)',
-          font: chartLayouts.base.font,
-          height: 460,
-          margin: { l: 60, r: 60, t: 60, b: 60 },
-        },
-        chartConfig
-      );
-    } else {
-      document.getElementById('chart-aqi-dist').innerHTML = '<p class="empty">Data quality profile available in research report</p>';
-    }
-    console.log('✓ Quality radar rendered');
-
-    // Chart 8: PM2.5 24-Hour Temporal Radar
-    console.log('Rendering temporal radar...');
-    if (charts.pm25_temporal_radar) {
-      const tempRadar = charts.pm25_temporal_radar;
-      Plotly.newPlot(
-        'chart-quality',
-        [
-          {
-            type: 'scatterpolar',
-            r: tempRadar.values || [],
-            theta: tempRadar.labels || [],
-            fill: 'toself',
-            name: 'PM2.5 by Hour',
-            line: { color: '#f25c54' },
-            fillcolor: 'rgba(242, 92, 84, 0.3)',
-            hovertemplate: '<b>%{theta}</b><br>PM2.5: %{r:.1f} µg/m³<extra></extra>',
-          },
-        ],
-        {
-          polar: {
-            radialaxis: { visible: true, range: [0, Math.max(...(tempRadar.values || [1])) * 1.2] }
-          },
-          title: 'PM2.5 Temporal Pattern (24-Hour Polar)',
-          font: chartLayouts.base.font,
-          height: 460,
-          margin: { l: 60, r: 60, t: 60, b: 60 },
-        },
-        chartConfig
-      );
-    } else {
-      document.getElementById('chart-quality').innerHTML = '<p class="empty">Temporal pattern analysis available in research report</p>';
-    }
-    console.log('✓ Temporal radar rendered');
-
-    // Calendar — GitHub-style SVG with individual colored cells
+    // Calendar — daily-mean PM2.5, coloured by WHO/EPA thresholds (computed client-side)
     if (charts.calendar && charts.calendar.days && charts.calendar.days.length > 0) {
-      renderAQICalendarSVG(charts.calendar.days);
+      const dailyPm = _dailyMeanPm25(charts.timeseries);
+      renderPM25CalendarSVG(charts.calendar.days, dailyPm);
     } else {
       const el = document.getElementById('chart-calendar');
       if (el) el.innerHTML = '<p class="empty" style="padding:2rem;text-align:center;color:#999;">Calendar requires at least 7 days of data.</p>';
@@ -882,9 +965,8 @@ function renderCharts(charts) {
 
     // Force Plotly to fill containers correctly after all charts are rendered
     setTimeout(() => {
-      ['chart-timeseries','chart-aqi','chart-hourly','chart-heatmap',
-       'chart-channel','chart-humidity','chart-aqi-dist','chart-quality',
-       'chart-correction','chart-drift'].forEach(id => {
+      ['chart-timeseries','chart-distribution','chart-hourly','chart-heatmap',
+       'chart-channel','chart-humidity','chart-correction'].forEach(id => {
         const el = document.getElementById(id);
         if (el && el.data) Plotly.Plots.resize(el);
       });
@@ -895,7 +977,7 @@ function renderCharts(charts) {
     console.error('Error stack:', error.stack);
     
     // Try to identify which chart failed
-    const chartIds = ['chart-timeseries', 'chart-aqi', 'chart-hourly', 'chart-heatmap', 'chart-channel', 'chart-humidity', 'chart-aqi-dist', 'chart-quality'];
+    const chartIds = ['chart-timeseries', 'chart-distribution', 'chart-hourly', 'chart-heatmap', 'chart-channel', 'chart-humidity'];
     chartIds.forEach(id => {
       const el = document.getElementById(id);
       if (el && !el.innerHTML) {
@@ -910,13 +992,11 @@ function renderCharts(charts) {
 function setupChartResize() {
   const chartIds = [
     'chart-timeseries',
-    'chart-aqi',
+    'chart-distribution',
     'chart-hourly',
     'chart-heatmap',
     'chart-channel',
     'chart-humidity',
-    'chart-aqi-dist',
-    'chart-quality',
     'chart-compare-timeseries',
   ];
 
@@ -1098,6 +1178,9 @@ function buildComparison(analyses) {
 
   Plotly.newPlot('chart-compare-timeseries', traces, layout, chartConfig);
 
+  // 24h + 1h rolling-median overlays with Control House highlighted
+  buildMedianComparisonCharts(analyses);
+
   // Multi-year overlay: only show if files span different years
   const yearOverlayContainer = document.getElementById('year-overlay-container');
   if (analyses && yearOverlayContainer) {
@@ -1138,6 +1221,95 @@ function buildComparison(analyses) {
   }
 }
 
+// Distinct, color-blind-friendly palette for non-control houses
+const HOUSE_PALETTE = ['#1f7a8c', '#e07a5f', '#f6aa1c', '#4c956c', '#8f3f97', '#ff7e00', '#2a9d8f', '#c1121f', '#6a4c93'];
+
+function _medianTraces(analyses, kind) {
+  // kind: '24h' uses rolling_median.timestamps + median_24h
+  //       '1h'  uses rolling_median.median_1h_timestamps + median_1h
+  let houseColorIdx = 0;
+  const traces = [];
+  analyses.forEach((a) => {
+    const rm = a.rolling_median || {};
+    let x, y;
+    if (kind === '24h') {
+      x = rm.timestamps || [];
+      y = rm.median_24h || [];
+    } else {
+      x = rm.median_1h_timestamps || [];
+      y = rm.median_1h || [];
+    }
+    if (!x.length || !y.length) return;
+    const name = a.label || a.filename || 'House';
+    if (a.is_control) {
+      traces.push({
+        x, y, type: 'scatter', mode: 'lines',
+        name: `${name} (Control)`,
+        line: { color: '#0a1f47', width: 3.2 },
+        hovertemplate: `<b>${name}</b><br>%{x}<br>%{y:.1f} µg/m³<extra></extra>`,
+      });
+    } else {
+      const color = HOUSE_PALETTE[houseColorIdx % HOUSE_PALETTE.length];
+      houseColorIdx += 1;
+      traces.push({
+        x, y, type: 'scatter', mode: 'lines',
+        name,
+        line: { color, width: 1.6 },
+        opacity: 0.92,
+        hovertemplate: `<b>${name}</b><br>%{x}<br>%{y:.1f} µg/m³<extra></extra>`,
+      });
+    }
+  });
+  // Draw control last so its bold line sits on top
+  traces.sort((t1, t2) => (/(Control)/.test(t1.name) ? 1 : 0) - (/(Control)/.test(t2.name) ? 1 : 0));
+  return traces;
+}
+
+function _medianLayout(title) {
+  return {
+    ...chartLayouts.base,
+    title,
+    xaxis: { ...chartLayouts.base.xaxis, title: 'Time' },
+    yaxis: { ...chartLayouts.base.yaxis, title: 'PM2.5 (µg/m³)' },
+    hovermode: 'x unified',
+    shapes: [
+      { type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y', y0: 15, y1: 15, line: { color: '#00a651', width: 1, dash: 'dot' } },
+      { type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y', y0: 35, y1: 35, line: { color: '#ff4444', width: 1, dash: 'dot' } },
+    ],
+    annotations: [
+      { xref: 'paper', x: 1, yref: 'y', y: 15, text: 'WHO 15', showarrow: false, xanchor: 'left', font: { size: 10, color: '#00a651' } },
+      { xref: 'paper', x: 1, yref: 'y', y: 35, text: 'EPA 35', showarrow: false, xanchor: 'left', font: { size: 10, color: '#ff4444' } },
+    ],
+  };
+}
+
+function buildMedianComparisonCharts(analyses) {
+  const c24 = document.getElementById('compare-24h-container');
+  const c1h = document.getElementById('compare-1h-container');
+
+  const t24 = _medianTraces(analyses, '24h');
+  if (c24) {
+    if (t24.length) {
+      c24.classList.remove('hidden');
+      Plotly.newPlot('chart-compare-median-24h', t24,
+        _medianLayout('24-Hour Median PM2.5 — Control House vs Others'), chartConfig);
+    } else {
+      c24.classList.add('hidden');
+    }
+  }
+
+  const t1h = _medianTraces(analyses, '1h');
+  if (c1h) {
+    if (t1h.length) {
+      c1h.classList.remove('hidden');
+      Plotly.newPlot('chart-compare-median-1h', t1h,
+        _medianLayout('1-Hour Median PM2.5 — Control House vs Others'), chartConfig);
+    } else {
+      c1h.classList.add('hidden');
+    }
+  }
+}
+
 async function handleSingleFile(file) {
   if (!file) return;
   setLoadingText('Analyzing data and building your dashboard...');
@@ -1170,7 +1342,9 @@ async function handleSingleFile(file) {
     currentFileId = file_id;
     initCustomNotes();  // resets customNotes=[] and clears the note cards list
 
+    currentTzLabel = (result.summary && result.summary.tz_label) || 'UTC';
     buildOverviewCards(result.summary);
+    buildDataCompleteness(result.data_completeness);
     buildDetectedColumns(result.detected);
     renderCharts(result.charts);
     populateChartDescriptions(result.chart_descriptions, result.summary.date_range);
@@ -1206,18 +1380,28 @@ async function handleSingleFile(file) {
 
 async function handleCompareRun() {
   if (compareFiles.length < 2) {
-    alert('Add at least 2 files to compare.');
+    alert('Add a Control House and at least one other house to compare.');
     return;
   }
   if (compareFiles.length > 10) {
-    alert('Maximum 10 files allowed for comparison.');
+    alert('Maximum 10 houses allowed for comparison.');
+    return;
+  }
+  if (_controlIndex() < 0) {
+    alert('Please designate a Control House before comparing.');
     return;
   }
 
-  const formData = new FormData();
-  compareFiles.forEach((file) => formData.append('files', file));
+  // Reorder so the Control House is always first (index 0 = control_index)
+  const ctlIdx = _controlIndex();
+  const ordered = [compareFiles[ctlIdx], ...compareFiles.filter((_, i) => i !== ctlIdx)];
 
-  setLoadingText(`Comparing ${compareFiles.length} files… This may take a moment for large datasets.`);
+  const formData = new FormData();
+  ordered.forEach((entry) => formData.append('files', entry.file));
+  formData.append('labels', JSON.stringify(ordered.map(e => e.label)));
+  formData.append('control_index', '0');
+
+  setLoadingText(`Comparing ${compareFiles.length} houses… This may take a moment for large datasets.`);
   showLoading(true);
   if (compareRunButton) compareRunButton.disabled = true;
 
@@ -1244,8 +1428,9 @@ async function handleCompareRun() {
       return;
     }
 
-    // Capture file_ids for comparison report download
+    // Capture file_ids + labels (control-first order) for comparison report download
     compareFileIds = analyses.map(a => a.file_id).filter(Boolean);
+    compareLabels  = analyses.map(a => a.label || a.filename || '');
     buildComparison(analyses);
     showLoading(false);
     showDashboard();
@@ -1376,39 +1561,66 @@ function setupDropzone() {
   });
 }
 
+function _controlIndex() {
+  return compareFiles.findIndex(e => e.isControl);
+}
+
+function _escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
 function _updateCompareUI() {
   const count = compareFiles.length;
+  const hasControl = _controlIndex() >= 0;
+  // House count = non-control entries
+  const houseCount = count - (hasControl ? 1 : 0);
+
   if (compareSelection) {
-    compareSelection.textContent = `${count} / 10 files selected.${count >= 2 ? ' Ready to compare.' : ' Add at least 2 files.'}`;
+    let msg = `${count} / 10 houses selected.`;
+    if (!hasControl) msg += ' Add a Control House.';
+    else if (houseCount < 1) msg += ' Add at least 1 more house to compare.';
+    else msg += ' Ready to compare.';
+    compareSelection.textContent = msg;
   }
-  if (compareRunButton) compareRunButton.disabled = count < 2;
+  // Need a control + at least 1 other house (2 total)
+  if (compareRunButton) compareRunButton.disabled = !(hasControl && houseCount >= 1);
   if (compareClearBtn) compareClearBtn.style.display = count > 0 ? '' : 'none';
 
-  // Rebuild file list display
   if (compareFileList) {
     const emptyNote = document.getElementById('compare-empty-note');
-    // Remove old file rows (keep the empty note node)
     Array.from(compareFileList.querySelectorAll('.compare-file-row')).forEach(el => el.remove());
 
     if (count === 0) {
       if (emptyNote) emptyNote.style.display = '';
     } else {
       if (emptyNote) emptyNote.style.display = 'none';
-      compareFiles.forEach((file, idx) => {
+      compareFiles.forEach((entry, idx) => {
         const row = document.createElement('div');
-        row.className = 'compare-file-row';
+        row.className = 'compare-file-row' + (entry.isControl ? ' is-control' : '');
+        const badge = entry.isControl
+          ? '<span class="compare-role-badge control">CONTROL</span>'
+          : `<span class="compare-role-badge house">${_escapeHtml(entry.label)}</span>`;
         row.innerHTML = `
-          <span class="compare-file-index">${idx + 1}</span>
-          <span class="compare-file-name" title="${file.name}">${file.name}</span>
-          <span class="compare-file-size">${(file.size / 1024).toFixed(0)} KB</span>
-          <button class="btn-remove-file" data-idx="${idx}" title="Remove this file">✕</button>
+          ${badge}
+          <input type="text" class="compare-name-input" data-idx="${idx}" value="${_escapeHtml(entry.label)}" maxlength="40" title="Display name for this house" />
+          <span class="compare-file-name" title="${_escapeHtml(entry.file.name)}">${_escapeHtml(entry.file.name)}</span>
+          <span class="compare-file-size">${(entry.file.size / 1024).toFixed(0)} KB</span>
+          ${entry.isControl ? '' : `<button class="btn-set-control" data-idx="${idx}" title="Make this the Control House">Set as Control</button>`}
+          <button class="btn-remove-file" data-idx="${idx}" title="Remove this house">✕</button>
         `;
         compareFileList.appendChild(row);
       });
     }
   }
 
-  // Disable add button when at max
+  // Add-control button: only available if no control yet
+  if (compareAddControlBtn) {
+    const disable = hasControl || count >= 10;
+    compareAddControlBtn.style.opacity = disable ? '0.5' : '1';
+    compareAddControlBtn.style.pointerEvents = disable ? 'none' : '';
+  }
   if (compareAddBtn) {
     compareAddBtn.style.opacity = count >= 10 ? '0.5' : '1';
     compareAddBtn.style.pointerEvents = count >= 10 ? 'none' : '';
@@ -1418,13 +1630,21 @@ function _updateCompareUI() {
 function setupCompareControls() {
   if (!compareRunButton || !compareSelection) return;
 
-  // "Add File" button triggers the hidden file picker programmatically
+  // "+ Control House" — next picked file becomes the control
+  if (compareAddControlBtn && compareFilePicker) {
+    compareAddControlBtn.addEventListener('click', () => {
+      if (_controlIndex() >= 0) { alert('A Control House is already set. Use "Set as Control" on a row to change it.'); return; }
+      if (compareFiles.length >= 10) { alert('Maximum 10 houses allowed.'); return; }
+      _pendingControl = true;
+      compareFilePicker.click();
+    });
+  }
+
+  // "+ Add House" — next picked file becomes a regular house
   if (compareAddBtn && compareFilePicker) {
     compareAddBtn.addEventListener('click', () => {
-      if (compareFiles.length >= 10) {
-        alert('Maximum 10 files allowed for comparison.');
-        return;
-      }
+      if (compareFiles.length >= 10) { alert('Maximum 10 houses allowed.'); return; }
+      _pendingControl = false;
       compareFilePicker.click();
     });
   }
@@ -1433,27 +1653,65 @@ function setupCompareControls() {
   if (compareFilePicker) {
     compareFilePicker.addEventListener('change', () => {
       const file = compareFilePicker.files?.[0];
-      if (!file) return;
+      compareFilePicker.value = ''; // reset so same path can be re-added
+      if (!file) { _pendingControl = false; return; }
       if (compareFiles.length >= 10) {
-        alert('Maximum 10 files allowed for comparison.');
-        compareFilePicker.value = '';
+        alert('Maximum 10 houses allowed.');
+        _pendingControl = false;
         return;
       }
-      compareFiles.push(file);
-      compareFilePicker.value = ''; // Reset so same file can be re-added from same path
+      const makeControl = _pendingControl && _controlIndex() < 0;
+      // Auto-label: Control House, or House N (count of existing non-control houses + 1)
+      const houseNum = compareFiles.filter(e => !e.isControl).length + 1;
+      compareFiles.push({
+        file,
+        label: makeControl ? 'Control House' : `House ${houseNum}`,
+        isControl: makeControl,
+      });
+      _pendingControl = false;
       _updateCompareUI();
     });
   }
 
-  // Remove individual file
+  // Row interactions: rename, set-control, remove
   if (compareFileList) {
+    // Live rename via the text input
+    compareFileList.addEventListener('input', (e) => {
+      const inp = e.target.closest('.compare-name-input');
+      if (!inp) return;
+      const idx = parseInt(inp.dataset.idx, 10);
+      if (!isNaN(idx) && compareFiles[idx]) {
+        compareFiles[idx].label = inp.value;
+      }
+    });
+
     compareFileList.addEventListener('click', (e) => {
-      const btn = e.target.closest('.btn-remove-file');
-      if (!btn) return;
-      const idx = parseInt(btn.dataset.idx, 10);
-      if (!isNaN(idx) && idx >= 0 && idx < compareFiles.length) {
-        compareFiles.splice(idx, 1);
-        _updateCompareUI();
+      const setCtl = e.target.closest('.btn-set-control');
+      if (setCtl) {
+        const idx = parseInt(setCtl.dataset.idx, 10);
+        if (!isNaN(idx) && compareFiles[idx]) {
+          // Demote any existing control, relabel it as a house if it still says "Control House"
+          compareFiles.forEach(en => {
+            if (en.isControl) {
+              en.isControl = false;
+              if (en.label === 'Control House') en.label = 'House';
+            }
+          });
+          compareFiles[idx].isControl = true;
+          if (compareFiles[idx].label === '' || /^House(\s|$)/.test(compareFiles[idx].label)) {
+            compareFiles[idx].label = 'Control House';
+          }
+          _updateCompareUI();
+        }
+        return;
+      }
+      const rm = e.target.closest('.btn-remove-file');
+      if (rm) {
+        const idx = parseInt(rm.dataset.idx, 10);
+        if (!isNaN(idx) && idx >= 0 && idx < compareFiles.length) {
+          compareFiles.splice(idx, 1);
+          _updateCompareUI();
+        }
       }
     });
   }
@@ -1463,6 +1721,7 @@ function setupCompareControls() {
     compareClearBtn.addEventListener('click', () => {
       compareFiles = [];
       compareFileIds = [];
+      _pendingControl = false;
       _updateCompareUI();
       if (comparisonResults) comparisonResults.classList.add('hidden');
     });
@@ -1486,7 +1745,8 @@ async function downloadComparisonReport() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         file_ids: compareFileIds,
-        filenames: compareFiles.map(f => f.name),
+        filenames: compareLabels,
+        labels: compareLabels,
       }),
     });
     if (!response.ok) {
@@ -1506,6 +1766,44 @@ async function downloadComparisonReport() {
     alert(`Failed to download report: ${err.message}`);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '📄 Download Comparison Report (PDF)'; }
+  }
+}
+
+async function downloadCommunityComparisonReport() {
+  if (compareFileIds.length < 2) {
+    alert('Run a comparison first to generate the report.');
+    return;
+  }
+  const btn = document.getElementById('compare-download-community');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+  try {
+    const response = await fetch('/api/community_report_compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file_ids: compareFileIds,   // control-first order
+        labels: compareLabels,
+        device_id: (deviceIdInput?.value || '').trim(),
+        location: (locationInput?.value || '').trim(),
+      }),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(err.detail || `HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `community_report_with_comparison_${new Date().toISOString().split('T')[0]}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert(`Failed to download community report: ${err.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🏡 Community Report + Comparison (PDF)'; }
   }
 }
 
@@ -1573,7 +1871,9 @@ function setupTimeframeSelector(fileId, summary) {
       const { result, outputs } = payload;
 
       // Update all dashboard sections with refined data
+      currentTzLabel = (result.summary && result.summary.tz_label) || 'UTC';
       buildOverviewCards(result.summary);
+      buildDataCompleteness(result.data_completeness);
       buildDetectedColumns(result.detected);
       renderCharts(result.charts);
       buildChartDownloads();
@@ -1592,38 +1892,62 @@ function setupTimeframeSelector(fileId, summary) {
   });
 }
 
-// ─── AQI Calendar SVG ────────────────────────────────────────────────────────
+// ─── PM2.5 Daily-Mean Calendar SVG ───────────────────────────────────────────
+// Coloured by WHO (15) / EPA (35) 24-hour concentration thresholds — never AQI,
+// since a PM2.5-only sensor cannot produce a valid multi-pollutant AQI.
 
-function _aqiColor(aqi) {
-  if (aqi === null || aqi === undefined) return '#e8e8e8';
-  if (aqi <= 50)  return '#00E400';
-  if (aqi <= 100) return '#FFFF00';
-  if (aqi <= 150) return '#FF7E00';
-  if (aqi <= 200) return '#FF0000';
-  if (aqi <= 300) return '#8F3F97';
-  return '#7E0023';
+function _pm25Color(v) {
+  if (v === null || v === undefined || !isFinite(v)) return '#e8e8e8';
+  if (v <= 15)  return '#2ca25f';   // within WHO guideline
+  if (v <= 35)  return '#ffd92f';   // above WHO, within EPA 24h
+  if (v <= 55)  return '#fc8d59';   // above EPA 24h
+  if (v <= 150) return '#e34a33';   // high
+  return '#7e0023';                 // very high
 }
 
-function _aqiCategory(aqi) {
-  if (aqi === null || aqi === undefined) return 'No data';
-  if (aqi <= 50)  return 'Good';
-  if (aqi <= 100) return 'Moderate';
-  if (aqi <= 150) return 'Unhealthy for Sensitive Groups';
-  if (aqi <= 200) return 'Unhealthy';
-  if (aqi <= 300) return 'Very Unhealthy';
-  return 'Hazardous';
+function _pm25Category(v) {
+  if (v === null || v === undefined || !isFinite(v)) return 'No data';
+  if (v <= 15)  return 'Within WHO guideline (≤15)';
+  if (v <= 35)  return 'Above WHO, within EPA 24h (15–35)';
+  if (v <= 55)  return 'Above EPA 24h standard (35–55)';
+  if (v <= 150) return 'High (55–150)';
+  return 'Very high (>150)';
 }
 
-function renderAQICalendarSVG(days) {
+// Compute date → daily-mean PM2.5 from the timeseries (EPA-corrected preferred).
+function _dailyMeanPm25(timeseries) {
+  const out = {};
+  if (!timeseries || !timeseries.timestamps) return out;
+  const ts = timeseries.timestamps;
+  const ys = timeseries.pm25_corrected || timeseries.pm25 || [];
+  const acc = {};
+  for (let i = 0; i < ts.length; i++) {
+    const v = ys[i];
+    if (v === null || v === undefined || !isFinite(v)) continue;
+    const day = String(ts[i]).slice(0, 10);
+    if (!acc[day]) acc[day] = { sum: 0, n: 0 };
+    acc[day].sum += v; acc[day].n += 1;
+  }
+  for (const d in acc) out[d] = acc[d].sum / acc[d].n;
+  return out;
+}
+
+function renderPM25CalendarSVG(days, dailyPm) {
   const container = document.getElementById('chart-calendar');
   if (!container) return;
+  dailyPm = dailyPm || {};
 
   const CELL = 20, GAP = 4, STEP = CELL + GAP;
   const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const LEFT_PAD = 42, TOP_PAD = 42, BOTTOM_PAD = 52;
 
-  // Sort days and build week columns (Monday-aligned)
+  // Resolve each day's PM2.5: prefer client-computed daily mean, fall back to backend pm25.
+  const valOf = d => {
+    const v = (d.date in dailyPm) ? dailyPm[d.date] : (d.pm25 ?? null);
+    return (v === null || v === undefined || !isFinite(v)) ? null : v;
+  };
+
   const sorted = [...days].sort((a, b) => a.date < b.date ? -1 : 1);
   const nWeeks = sorted.length > 0 ? (Math.max(...sorted.map(d => d.week_seq)) + 1) : 0;
   if (nWeeks === 0) {
@@ -1633,11 +1957,8 @@ function renderAQICalendarSVG(days) {
 
   const svgW = Math.max(LEFT_PAD + nWeeks * STEP + 24, 300);
   const svgH = TOP_PAD + 7 * STEP + BOTTOM_PAD;
+  const latestDay = sorted.filter(d => valOf(d) !== null).slice(-1)[0];
 
-  // Find the most recent day with data
-  const latestDay = sorted.filter(d => d.aqi !== null && d.aqi !== undefined).slice(-1)[0];
-
-  // Month label positions — only at month transitions, with minimum spacing of 28px
   const monthLabels = [];
   let lastMonth = null, lastLabelX = -999;
   sorted.forEach(d => {
@@ -1646,56 +1967,47 @@ function renderAQICalendarSVG(days) {
       const x = LEFT_PAD + d.week_seq * STEP;
       const monthIdx = parseInt(d.date.slice(5, 7), 10) - 1;
       const label = MONTH_NAMES[monthIdx] + ' \'' + d.date.slice(2, 4);
-      if (x - lastLabelX >= 30) {
-        monthLabels.push({ x, label });
-        lastLabelX = x;
-      }
+      if (x - lastLabelX >= 30) { monthLabels.push({ x, label }); lastLabelX = x; }
       lastMonth = mo;
     }
   });
 
-  // Build SVG (scrollable wrapper applied via CSS)
   let svgParts = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" ` +
     `style="font-family:Space Grotesk,sans-serif;display:block;">`
   ];
-
-  // Day-of-week labels
   DAY_LABELS.forEach((label, i) => {
     svgParts.push(
       `<text x="${LEFT_PAD - 6}" y="${TOP_PAD + i * STEP + CELL - 5}" ` +
       `text-anchor="end" font-size="11" fill="#666">${label}</text>`
     );
   });
-
-  // Month labels (top, no overlap)
   monthLabels.forEach(({ x, label }) => {
     svgParts.push(`<text x="${x + 2}" y="${TOP_PAD - 10}" font-size="11" font-weight="600" fill="#444">${label}</text>`);
   });
 
-  // Cells
   sorted.forEach(d => {
     const cx = LEFT_PAD + d.week_seq * STEP;
     const cy = TOP_PAD + d.weekday * STEP;
-    const color = _aqiColor(d.aqi);
+    const v = valOf(d);
+    const color = _pm25Color(v);
     const isLatest = latestDay && d.date === latestDay.date;
     const stroke = isLatest ? '#1f1c16' : '#e0dbd0';
     const sw = isLatest ? 2 : 0.5;
     svgParts.push(
       `<rect class="aqi-cal-cell" x="${cx}" y="${cy}" width="${CELL}" height="${CELL}" rx="3" ry="3" ` +
       `fill="${color}" stroke="${stroke}" stroke-width="${sw}" ` +
-      `data-date="${d.date}" data-aqi="${d.aqi ?? ''}" data-cat="${_aqiCategory(d.aqi)}" />`
+      `data-date="${d.date}" data-pm="${v === null ? '' : v.toFixed(1)}" data-cat="${_pm25Category(v)}" />`
     );
   });
 
-  // Legend row
+  // Legend — PM2.5 concentration bands
   const legendItems = [
-    { label: 'Good', color: '#00E400' },
-    { label: 'Moderate', color: '#FFFF00' },
-    { label: 'USG', color: '#FF7E00' },
-    { label: 'Unhealthy', color: '#FF0000' },
-    { label: 'V. Unhealthy', color: '#8F3F97' },
-    { label: 'Hazardous', color: '#7E0023' },
+    { label: '≤15 (WHO)', color: '#2ca25f' },
+    { label: '15–35 (EPA)', color: '#ffd92f' },
+    { label: '35–55', color: '#fc8d59' },
+    { label: '55–150', color: '#e34a33' },
+    { label: '>150', color: '#7e0023' },
     { label: 'No data', color: '#e8e8e8' },
   ];
   const legendY = TOP_PAD + 7 * STEP + 18;
@@ -1708,16 +2020,15 @@ function renderAQICalendarSVG(days) {
 
   svgParts.push('</svg>');
 
-  // Wrap SVG + subtitle
+  const lv = latestDay ? valOf(latestDay) : null;
   const dataNote = latestDay
-    ? `Daily average AQI from uploaded file data (not real-time) — latest: <strong>${latestDay.date}</strong>, AQI <strong>${latestDay.aqi ?? 'N/A'}</strong> (${_aqiCategory(latestDay.aqi)})`
-    : 'Daily average AQI from uploaded file data (not real-time)';
+    ? `Daily mean PM2.5 (µg/m³) from uploaded data — latest: <strong>${latestDay.date}</strong>, <strong>${lv === null ? 'N/A' : lv.toFixed(1)} µg/m³</strong> (${_pm25Category(lv)})`
+    : 'Daily mean PM2.5 (µg/m³) from uploaded data';
 
   container.innerHTML =
     `<div class="aqi-cal-scroll">${svgParts.join('')}</div>` +
     `<p class="aqi-cal-note">${dataNote}</p>`;
 
-  // Floating tooltip
   let tip = document.getElementById('aqi-cal-tip');
   if (!tip) {
     tip = document.createElement('div');
@@ -1725,20 +2036,17 @@ function renderAQICalendarSVG(days) {
     tip.className = 'aqi-cal-tip';
     document.body.appendChild(tip);
   }
-
   container.querySelectorAll('.aqi-cal-cell').forEach(cell => {
     cell.addEventListener('mouseenter', () => {
-      const aqi = cell.dataset.aqi !== '' ? Number(cell.dataset.aqi) : null;
-      tip.innerHTML = `<strong>${cell.dataset.date}</strong><br>AQI: ${aqi ?? 'N/A'} — ${cell.dataset.cat}`;
+      const pm = cell.dataset.pm !== '' ? cell.dataset.pm : 'N/A';
+      tip.innerHTML = `<strong>${cell.dataset.date}</strong><br>PM2.5: ${pm} µg/m³ — ${cell.dataset.cat}`;
       tip.style.display = 'block';
     });
     cell.addEventListener('mousemove', (e) => {
       tip.style.left = (e.pageX + 14) + 'px';
       tip.style.top  = (e.pageY - 40) + 'px';
     });
-    cell.addEventListener('mouseleave', () => {
-      tip.style.display = 'none';
-    });
+    cell.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
   });
 }
 
@@ -1826,6 +2134,11 @@ _updateCompareUI();
 
 if (compareDownloadReportBtn) {
   compareDownloadReportBtn.addEventListener('click', downloadComparisonReport);
+}
+
+const compareDownloadCommunityBtn = document.getElementById('compare-download-community');
+if (compareDownloadCommunityBtn) {
+  compareDownloadCommunityBtn.addEventListener('click', downloadCommunityComparisonReport);
 }
 
 if (correctionSelect) {

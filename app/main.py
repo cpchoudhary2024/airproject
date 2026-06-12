@@ -12,7 +12,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from .analysis import analyze_dataset, build_comparison_pdf
+from fastapi.responses import StreamingResponse
+from .analysis import analyze_dataset, build_comparison_pdf, build_public_report_pdf
 
 APP_ROOT = Path(__file__).resolve().parent
 # DATA_DIR env var lets any deployment (HF Spaces, Docker, Vercel) set the writable path.
@@ -164,26 +165,56 @@ async def analyze(
 
 
 @app.post("/api/analyze-multi")
-async def analyze_multi(files: list[UploadFile] = File(...)) -> dict:
+async def analyze_multi(
+    files: list[UploadFile] = File(...),
+    labels: str = Form(""),
+    control_index: int = Form(0),
+) -> dict:
     if not files or len(files) < 2:
         raise HTTPException(status_code=400, detail="Upload at least 2 files")
     if len(files) > 10:
         raise HTTPException(status_code=400, detail="Upload up to 10 files")
 
+    # Parse optional per-file display labels (JSON array of strings, same order as files)
+    label_list: list[str] = []
+    if labels:
+        try:
+            parsed = json.loads(labels)
+            if isinstance(parsed, list):
+                label_list = [str(x) for x in parsed]
+        except Exception:
+            label_list = []
+
     analyses: list[dict] = []
     keep_dirs: set[Path] = set()
+    _house_counter = 0  # sequential numbering for non-control files
 
-    for file in files:
-        file_id, job_dir, result, outputs = await _run_analysis_job(file, generate_outputs=False)
+    for idx, file in enumerate(files):
+        # Generate full outputs for the Control House so a community report
+        # (which needs daily_aqi.csv / hourly_summary.csv + figures) can be built for it.
+        _gen = (idx == control_index)
+        file_id, job_dir, result, outputs = await _run_analysis_job(file, generate_outputs=_gen)
         keep_dirs.add(job_dir)
+
+        # Resolve a display label: explicit label > "Control House" / "House N" fallback
+        if idx == control_index:
+            label = (label_list[idx].strip() if idx < len(label_list) and label_list[idx].strip()
+                     else "Control House")
+        else:
+            _house_counter += 1
+            label = (label_list[idx].strip() if idx < len(label_list) and label_list[idx].strip()
+                     else f"House {_house_counter}")
 
         # Return a comparison-focused payload (still includes ids for downloads).
         analyses.append(
             {
                 "file_id": file_id,
                 "filename": file.filename,
+                "label": label,
+                "is_control": idx == control_index,
                 "summary": result.get("summary", {}),
                 "timeseries": result.get("charts", {}).get("timeseries", {}),
+                "rolling_median": result.get("charts", {}).get("rolling_median", {}),
                 "daily_doy": result.get("charts", {}).get("daily_doy", []),
                 "outputs": outputs,
             }
@@ -507,6 +538,179 @@ def export_to_word(file_id: str) -> FileResponse:
         raise HTTPException(status_code=500, detail=f"Word export failed: {str(e)}")
 
 
+@app.post("/api/community_report/{file_id}")
+async def regenerate_community_report(
+    file_id: str,
+    device_id: str = Form(""),
+    location: str = Form(""),
+) -> StreamingResponse:
+    """Regenerate the community report with custom device_id / location metadata."""
+    import io, tempfile, pandas as pd
+    from pathlib import Path as _P
+
+    job_dir = DATA_ROOT / file_id
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Unknown analysis id")
+    summary_path = job_dir / "summary.json"
+    if not summary_path.exists():
+        raise HTTPException(status_code=404, detail="Analysis data not found")
+    try:
+        with summary_path.open("r", encoding="utf-8") as f:
+            stored = json.load(f)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not read analysis data")
+
+    pdf_params  = stored.get("_pdf_params", {})
+    base_meta   = pdf_params.get("metadata") or {}
+    meta = {
+        **base_meta,
+        "device_id": device_id.strip() or base_meta.get("device_id", ""),
+        "location":  location.strip()  or base_meta.get("location",  ""),
+    }
+
+    summary     = stored.get("summary", {})
+    # Exceedance counts live under result["tables"]["exceedances"]; fall back to a
+    # top-level key for forward compatibility.
+    exceedances = stored.get("exceedances") or stored.get("tables", {}).get("exceedances", {})
+    anomalies   = stored.get("anomalies", [])
+    channel_agreement = pdf_params.get("channel_agreement") or {}
+
+    # Load daily/hourly data — use the actual filenames written by _write_outputs
+    daily_path  = job_dir / "daily_aqi.csv"
+    hourly_path = job_dir / "hourly_summary.csv"
+    if not daily_path.exists() or not hourly_path.exists():
+        raise HTTPException(status_code=404, detail="Daily/hourly CSV data not found in job directory")
+    daily  = pd.read_csv(daily_path)
+    hourly = pd.read_csv(hourly_path)
+
+    # Reconstruct figures using the stored title→filename map saved during analysis
+    stored_figs = pdf_params.get("figures") or []
+    if stored_figs:
+        figures = [
+            (title, job_dir / fname)
+            for title, fname in stored_figs
+            if (job_dir / fname).exists()
+        ]
+    else:
+        # Fallback: known mapping for figures created by build_report_figures
+        _known = {
+            "Rolling medians":    "fig_rolling_medians.png",
+            "Diurnal pattern":    "fig_diurnal.png",
+            "PM2.5 Temporal Radar": "fig_radar_pm25_temporal.png",
+        }
+        figures = [
+            (title, job_dir / fname)
+            for title, fname in _known.items()
+            if (job_dir / fname).exists()
+        ]
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp.close()
+    try:
+        build_public_report_pdf(
+            _P(tmp.name), summary, daily, hourly, anomalies,
+            channel_agreement, figures, exceedances=exceedances, metadata=meta,
+        )
+        with open(tmp.name, "rb") as fh:
+            content = fh.read()
+    finally:
+        import os as _os
+        try: _os.unlink(tmp.name)
+        except Exception: pass
+
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=community_air_quality_report.pdf"},
+    )
+
+
+@app.post("/api/community_report_compare")
+async def community_report_with_comparison(payload: dict) -> StreamingResponse:
+    """Community report for the Control House with an appended House Comparison page.
+
+    payload: { file_ids: [...control-first...], labels: [...], device_id, location }
+    The first file_id must be the Control House (it has full outputs on disk).
+    """
+    import io, tempfile, pandas as pd
+    from pathlib import Path as _P
+
+    file_ids = payload.get("file_ids") or []
+    labels   = payload.get("labels") or []
+    if len(file_ids) < 2:
+        raise HTTPException(status_code=400, detail="Provide the Control House plus at least one other house")
+
+    control_id = file_ids[0]
+    job_dir = DATA_ROOT / control_id
+    summary_path = job_dir / "summary.json"
+    if not summary_path.exists():
+        raise HTTPException(status_code=404, detail="Control House analysis not found")
+    daily_path  = job_dir / "daily_aqi.csv"
+    hourly_path = job_dir / "hourly_summary.csv"
+    if not daily_path.exists() or not hourly_path.exists():
+        raise HTTPException(status_code=404, detail="Control House output data not found (re-run the comparison)")
+
+    with summary_path.open("r", encoding="utf-8") as f:
+        stored = json.load(f)
+
+    pdf_params = stored.get("_pdf_params", {})
+    base_meta  = pdf_params.get("metadata") or {}
+    meta = {
+        **base_meta,
+        "device_id": str(payload.get("device_id", "")).strip() or base_meta.get("device_id", ""),
+        "location":  str(payload.get("location", "")).strip()  or base_meta.get("location",  ""),
+    }
+    summary     = stored.get("summary", {})
+    # Exceedance counts live under result["tables"]["exceedances"]; fall back to a
+    # top-level key for forward compatibility.
+    exceedances = stored.get("exceedances") or stored.get("tables", {}).get("exceedances", {})
+    anomalies   = stored.get("anomalies", [])
+    channel_agreement = pdf_params.get("channel_agreement") or {}
+    daily  = pd.read_csv(daily_path)
+    hourly = pd.read_csv(hourly_path)
+
+    stored_figs = pdf_params.get("figures") or []
+    figures = [(t, job_dir / fn) for t, fn in stored_figs if (job_dir / fn).exists()]
+
+    # Build the comparison list (each house's rolling_median from its summary.json)
+    comparison = []
+    for i, fid in enumerate(file_ids):
+        sp = DATA_ROOT / fid / "summary.json"
+        if not sp.exists():
+            continue
+        try:
+            with sp.open("r", encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            continue
+        comparison.append({
+            "label": labels[i] if i < len(labels) and str(labels[i]).strip() else (f"Control House" if i == 0 else f"House {i}"),
+            "is_control": i == 0,
+            "rolling_median": d.get("charts", {}).get("rolling_median", {}),
+        })
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp.close()
+    try:
+        build_public_report_pdf(
+            _P(tmp.name), summary, daily, hourly, anomalies,
+            channel_agreement, figures, exceedances=exceedances, metadata=meta,
+            comparison=comparison,
+        )
+        with open(tmp.name, "rb") as fh:
+            content = fh.read()
+    finally:
+        import os as _os
+        try: _os.unlink(tmp.name)
+        except Exception: pass
+
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=community_report_with_comparison.pdf"},
+    )
+
+
 @app.get("/api/download/{file_id}/{kind}")
 def download(file_id: str, kind: str) -> FileResponse:
     job_dir = DATA_ROOT / file_id
@@ -629,16 +833,23 @@ async def generate_custom_report(file_id: str, payload: dict) -> FileResponse:
     highest_events = (stored.get("tables") or {}).get("highest_events") or []
 
     # Figures must be List[Tuple[str, Path]] — same format build_report_figures returns.
-    # Map each saved PNG to its (title, path) tuple; skip files that don't exist.
-    figure_map = [
-        ("Channel A vs B",      "fig_channel_ab.png"),
-        ("Diurnal pattern",     "fig_diurnal.png"),
-        ("Sensor drift",        "fig_drift.png"),
-        ("Rolling medians",     "fig_rolling_medians.png"),
-        ("PM2.5 Temporal Radar","fig_radar_pm25_temporal.png"),
-        ("STL Residuals",       "fig_stl_residuals.png"),
-    ]
-    figures = [(title, job_dir / fn) for title, fn in figure_map if (job_dir / fn).exists()]
+    # Prefer the title→filename map persisted during analysis (always current, includes
+    # every figure such as Weekly heatmap and Bland-Altman); fall back to a known list.
+    stored_figs = pdf_params.get("figures") or []
+    if stored_figs:
+        figures = [(title, job_dir / fn) for title, fn in stored_figs if (job_dir / fn).exists()]
+    else:
+        figure_map = [
+            ("Rolling medians",     "fig_rolling_medians.png"),
+            ("STL Residuals",       "fig_stl_residuals.png"),
+            ("Diurnal pattern",     "fig_diurnal.png"),
+            ("PM2.5 Temporal Radar","fig_radar_pm25_temporal.png"),
+            ("Weekly heatmap",      "fig_weekly_heatmap.png"),
+            ("Channel A vs B",      "fig_channel_ab.png"),
+            ("Bland-Altman",        "fig_bland_altman.png"),
+            ("Sensor drift",        "fig_drift.png"),
+        ]
+        figures = [(title, job_dir / fn) for title, fn in figure_map if (job_dir / fn).exists()]
 
     report_path = job_dir / "report_custom.pdf"
     try:
@@ -667,12 +878,13 @@ async def generate_compare_report(payload: dict) -> FileResponse:
     """Generate and download a comprehensive comparison PDF report."""
     file_ids: list[str] = payload.get("file_ids", [])
     filenames: list[str] = payload.get("filenames", [])
+    labels: list[str] = payload.get("labels", []) or filenames
 
     if len(file_ids) < 2:
         raise HTTPException(status_code=400, detail="Provide at least 2 file_ids")
 
     analyses: list[dict] = []
-    for fid, fname in zip(file_ids, filenames):
+    for i, fid in enumerate(file_ids):
         job_dir = DATA_ROOT / fid
         summary_path = job_dir / "summary.json"
         if not summary_path.exists():
@@ -680,13 +892,19 @@ async def generate_compare_report(payload: dict) -> FileResponse:
         try:
             with summary_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            # summary.json stores result at top level (no nested "result" key)
-            analyses.append({"summary": data.get("summary", {})})
+            # summary.json stores result at top level (no nested "result" key).
+            # Include rolling_median so the PDF can draw 1h/24h comparison charts.
+            analyses.append({
+                "summary": data.get("summary", {}),
+                "rolling_median": data.get("charts", {}).get("rolling_median", {}),
+                "label": labels[i] if i < len(labels) and str(labels[i]).strip() else f"House {i}",
+                "is_control": i == 0,  # file_ids arrive control-first from the UI
+            })
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to read analysis {fid}: {e}")
 
     if not filenames or len(filenames) < len(file_ids):
-        filenames = [f"File {i+1}" for i in range(len(file_ids))]
+        filenames = [a["label"] for a in analyses]
 
     # Write comparison PDF to a temp dir associated with the first job
     out_dir = DATA_ROOT / file_ids[0]
