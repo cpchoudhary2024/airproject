@@ -219,218 +219,6 @@ function buildOverviewCards(summary) {
   }
 }
 
-// Escape user/text values before inserting into innerHTML.
-function _esc(v) {
-  if (v === null || v === undefined) return '';
-  return String(v).replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-  ));
-}
-
-// Scientific-rigor panel (Tier 1–3): trend test, exposure burden, measurement
-// uncertainty, and the reproducibility ID.
-function buildScientificRigor(summary) {
-  const section = document.getElementById('rigor-section');
-  const container = document.getElementById('rigor-cards');
-  const footer = document.getElementById('repro-footer');
-  if (!section || !container) return;
-  container.innerHTML = '';
-  const cards = [];
-
-  const tt = summary.trend_test;
-  if (tt) {
-    const arrow = tt.direction === 'increasing' ? '▲' : tt.direction === 'decreasing' ? '▼' : '→';
-    const col = !tt.significant ? '#6d6256' : (tt.sen_slope_per_year > 0 ? '#ff4444' : '#00a651');
-    cards.push({
-      title: 'Trend (Mann-Kendall · Theil-Sen)',
-      value: `${arrow} ${tt.sen_slope_per_year} µg/m³·yr`,
-      note: `${_esc(tt.direction)} · τ=${tt.tau}, p=${tt.p_value} · 95% CI [${tt.sen_slope_ci.join(', ')}]`,
-      color: col,
-      formula: tt.change_point_date
-        ? `Change-point detected ${_esc(tt.change_point_date)} (Pettitt p=${tt.change_point_p})`
-        : `No significant change-point (Pettitt p=${tt.change_point_p})`,
-    });
-  }
-
-  const ex = summary.exposure;
-  if (ex) {
-    cards.push({
-      title: 'Cumulative Exposure',
-      value: `${ex.cumulative_ug_hours} µg·h`,
-      note: `Over ${ex.exposure_hours} h · mean ${ex.mean_pm25} µg/m³`,
-      color: '#1f7a8c',
-    });
-    cards.push({
-      title: 'Days Over Guideline',
-      value: `${ex.days_over_who15 ?? '—'} / ${ex.n_days ?? '—'}`,
-      note: `Days above WHO 15 (EPA 35: ${ex.days_over_epa35 ?? '—'} days)`,
-      color: (ex.days_over_who15 || 0) > 0 ? '#f6aa1c' : '#00a651',
-    });
-    if (ex.excess_mortality_risk_pct !== null && ex.excess_mortality_risk_pct !== undefined) {
-      cards.push({
-        title: 'Illustrative Excess Risk',
-        value: `+${ex.excess_mortality_risk_pct}%`,
-        note: 'Long-term (WHO/GBD RR≈1.08 per 10 µg/m³) vs WHO 15 — not a clinical prediction',
-        color: ex.excess_mortality_risk_pct > 0 ? '#f25c54' : '#00a651',
-      });
-    }
-  }
-
-  const un = summary.uncertainty;
-  if (un && un.mean_ci_halfwidth !== null && un.mean_ci_halfwidth !== undefined) {
-    cards.push({
-      title: 'Measurement Uncertainty',
-      value: `±${un.mean_ci_halfwidth} µg/m³`,
-      note: `Mean 95% CI half-width · ${_esc(un.method)}`,
-      color: '#6d6256',
-      formula: un.single_channel ? 'Single-channel sensor: correction error only' : null,
-    });
-  }
-
-  if (cards.length === 0) { section.classList.add('hidden'); return; }
-
-  cards.forEach((card) => {
-    const div = document.createElement('div');
-    div.className = 'card';
-    div.innerHTML = `
-      <p class="card-title">${_esc(card.title)}</p>
-      <div class="card-value" style="color: ${card.color}">${_esc(card.value)}</div>
-      ${card.formula ? `<p class="card-formula">${_esc(card.formula)}</p>` : ''}
-      <p class="card-note">${_esc(card.note)}</p>
-    `;
-    container.appendChild(div);
-  });
-
-  if (footer) {
-    const rp = summary.repro;
-    if (rp && rp.repro_id) {
-      footer.innerHTML = `Reproducibility ID: <code>${_esc(rp.repro_id)}</code> — SHA-256 of your input data + method versions (${_esc((rp.method_versions || {}).app_version || '')}). Quote it to reproduce or audit this result.`;
-    } else {
-      footer.textContent = '';
-    }
-  }
-
-  section.classList.remove('hidden');
-}
-
-// Opt-in location-based features (Tier 1): reference-monitor validation and
-// pollution rose. Nothing fires until the user clicks; only coords + dates are
-// sent server-side. Requires the dataset to carry valid coordinates.
-function buildLocationFeatures(summary, fileId) {
-  const section = document.getElementById('location-section');
-  if (!section) return;
-  const refBtn = document.getElementById('btn-ref-validate');
-  const roseBtn = document.getElementById('btn-pollution-rose');
-  const note = document.getElementById('location-note');
-  const refOut = document.getElementById('ref-result');
-  const roseOut = document.getElementById('rose-result');
-  if (refOut) { refOut.classList.add('hidden'); refOut.innerHTML = ''; }
-  if (roseOut) roseOut.classList.add('hidden');
-
-  const hasCoords = summary && summary.latitude !== null && summary.latitude !== undefined
-    && summary.longitude !== null && summary.longitude !== undefined;
-
-  section.classList.remove('hidden');
-  if (!hasCoords) {
-    if (note) note.innerHTML = 'This dataset has no location (latitude/longitude) columns, so location-based '
-      + 'analysis is unavailable. Export your PurpleAir data with location fields to enable it.';
-    if (refBtn) refBtn.disabled = true;
-    if (roseBtn) roseBtn.disabled = true;
-    return;
-  }
-  if (refBtn) refBtn.disabled = false;
-  if (roseBtn) roseBtn.disabled = false;
-
-  if (refBtn) refBtn.onclick = () => runReferenceValidation(fileId);
-  if (roseBtn) roseBtn.onclick = () => runPollutionRose(fileId);
-}
-
-async function _postLocation(url, btn, busyText) {
-  const original = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = busyText; }
-  try {
-    const resp = await fetch(url, { method: 'POST' });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.detail || `Request failed (${resp.status})`);
-    return data;
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = original; }
-  }
-}
-
-async function runReferenceValidation(fileId) {
-  const out = document.getElementById('ref-result');
-  const btn = document.getElementById('btn-ref-validate');
-  if (!out) return;
-  out.classList.remove('hidden');
-  out.innerHTML = '<p class="empty">Contacting the nearest regulatory monitor…</p>';
-  try {
-    const d = await _postLocation(`/api/reference-validation/${fileId}`, btn, 'Comparing…');
-    const st = d.stats || {}; const mon = d.monitor || {};
-    const cards = [
-      ['Correlation (R²)', st.r2, st.r2 >= 0.7 ? '#00a651' : st.r2 >= 0.5 ? '#f6aa1c' : '#ff4444'],
-      ['Bias (sensor − ref)', `${st.bias} µg/m³`, '#1f7a8c'],
-      ['RMSE', `${st.rmse} µg/m³`, '#1f7a8c'],
-      ['Slope', st.slope, '#6d6256'],
-      ['Overlapping hours', st.n_hours, '#6d6256'],
-    ].map(([t, v, c]) => `<div class="card"><p class="card-title">${_esc(t)}</p>`
-      + `<div class="card-value" style="color:${c}">${_esc(v)}</div></div>`).join('');
-    out.innerHTML = `<h3 class="location-result-title">Regulatory Collocation — vs ${_esc(mon.name || 'nearest monitor')}`
-      + `${mon.distance_km != null ? ` (${_esc(mon.distance_km)} km away)` : ''}</h3>`
-      + `<div class="cards">${cards}</div>`
-      + `<div class="chart" id="chart-ref-scatter"></div>`
-      + `<p class="section-note">${_esc(d.disclosure || '')}</p>`;
-    const sc = d.scatter || { sensor: [], reference: [] };
-    const maxv = Math.max(1, ...sc.sensor, ...sc.reference);
-    Plotly.newPlot('chart-ref-scatter', [
-      { x: sc.reference, y: sc.sensor, mode: 'markers', type: 'scatter', name: 'Hourly pairs',
-        marker: { color: '#1f7a8c', size: 6, opacity: 0.6 },
-        hovertemplate: 'Reference %{x} µg/m³<br>Sensor %{y} µg/m³<extra></extra>' },
-      { x: [0, maxv], y: [0, maxv], mode: 'lines', name: '1:1 line',
-        line: { color: '#f25c54', width: 1.5, dash: 'dash' }, hoverinfo: 'skip' },
-    ], {
-      ...chartLayouts.base, title: 'Sensor vs Regulatory Monitor (hourly PM2.5)',
-      xaxis: { title: 'Regulatory monitor (µg/m³)', ...chartLayouts.base.xaxis },
-      yaxis: { title: 'This sensor, EPA-corrected (µg/m³)', ...chartLayouts.base.yaxis },
-    }, chartConfig);
-  } catch (e) {
-    out.innerHTML = `<p class="empty">${_esc(e.message)}</p>`;
-  }
-}
-
-async function runPollutionRose(fileId) {
-  const out = document.getElementById('rose-result');
-  const btn = document.getElementById('btn-pollution-rose');
-  const note = document.getElementById('rose-note');
-  if (!out) return;
-  out.classList.remove('hidden');
-  if (note) note.textContent = 'Fetching wind data…';
-  try {
-    const d = await _postLocation(`/api/pollution-rose/${fileId}`, btn, 'Building…');
-    if (note) note.innerHTML = `Mean PM2.5 by the wind direction it arrived on (${_esc(d.n_hours)} hours). `
-      + `Longer wedges = dirtier air from that direction. Dominant source direction: `
-      + `<strong>${_esc(d.dominant_sector || 'n/a')}</strong>. ${_esc(d.disclosure || '')}`;
-    Plotly.newPlot('chart-pollution-rose', [{
-      type: 'barpolar',
-      r: d.mean_pm25,
-      theta: d.sectors,
-      marker: {
-        color: d.mean_pm25,
-        colorscale: [[0, '#2a9d8f'], [0.5, '#f6aa1c'], [1, '#c1121f']],
-        colorbar: { title: 'µg/m³' },
-      },
-      hovertemplate: '%{theta}: %{r} µg/m³<extra></extra>',
-    }], {
-      ...chartLayouts.base,
-      title: 'Pollution Rose — Mean PM2.5 by Wind Direction',
-      polar: { radialaxis: { ticksuffix: ' µg/m³', angle: 45 }, angularaxis: { direction: 'clockwise', rotation: 90 } },
-    }, chartConfig);
-  } catch (e) {
-    if (note) note.textContent = '';
-    out.innerHTML = `<h3 class="location-result-title">Pollution Rose</h3><p class="empty">${_esc(e.message)}</p>`;
-  }
-}
-
 function buildDataCompleteness(dc) {
   const el = document.getElementById('data-completeness');
   if (!el) return;
@@ -886,32 +674,9 @@ function renderCharts(charts) {
 
     // Chart 1: Time series
     console.log('Rendering timeseries...');
-    // Measurement-uncertainty band (Tier 1): drawn first so it sits behind the
-    // trend lines. ci_high (invisible) then ci_low with fill 'tonexty'.
-    const _ciBand = [];
-    if (charts.timeseries.ci_low && charts.timeseries.ci_high) {
-      const _ciName = charts.timeseries.ci_single_channel
-        ? '95% uncertainty (correction only)'
-        : '95% measurement uncertainty';
-      _ciBand.push({
-        x: charts.timeseries.timestamps,
-        y: charts.timeseries.ci_high,
-        mode: 'lines', line: { width: 0 },
-        hoverinfo: 'skip', showlegend: false, name: 'ci_high',
-      });
-      _ciBand.push({
-        x: charts.timeseries.timestamps,
-        y: charts.timeseries.ci_low,
-        mode: 'lines', line: { width: 0 },
-        fill: 'tonexty', fillcolor: 'rgba(242,92,84,0.14)',
-        name: _ciName,
-        hovertemplate: '95% CI: %{y:.1f} µg/m³<extra></extra>',
-      });
-    }
     Plotly.newPlot(
       'chart-timeseries',
       [
-        ..._ciBand,
         {
           x: charts.timeseries.timestamps,
           y: charts.timeseries.pm25,
@@ -1590,8 +1355,6 @@ async function handleSingleFile(file) {
 
     currentTzLabel = (result.summary && result.summary.tz_label) || 'UTC';
     buildOverviewCards(result.summary);
-    buildScientificRigor(result.summary);
-    buildLocationFeatures(result.summary, file_id);
     buildDataCompleteness(result.data_completeness);
     buildDetectedColumns(result.detected);
     renderCharts(result.charts);
@@ -2121,8 +1884,6 @@ function setupTimeframeSelector(fileId, summary) {
       // Update all dashboard sections with refined data
       currentTzLabel = (result.summary && result.summary.tz_label) || 'UTC';
       buildOverviewCards(result.summary);
-      buildScientificRigor(result.summary);
-      buildLocationFeatures(result.summary, currentFileId);
       buildDataCompleteness(result.data_completeness);
       buildDetectedColumns(result.detected);
       renderCharts(result.charts);
