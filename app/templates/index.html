@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
     <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260612a" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260703a" />
   </head>
   <body>
     <div class="app">
@@ -254,6 +254,74 @@
               <p class="small">Contiguous gaps (e.g., 8+ hours) are more damaging to trend analysis than random blips.</p>
             </div>
           </div>
+        </section>
+
+        <section class="section methods-references">
+          <h2>Methods &amp; Standards</h2>
+          <p class="section-note">Every metric on this platform is traceable to a published method or an official health standard. These are the primary sources — citable directly in research, regulatory, and community documentation.</p>
+
+          <div class="reference-thresholds">
+            <div class="ref-threshold-card">
+              <span class="ref-th-label">WHO 2021 — 24-hour PM<sub>2.5</sub></span>
+              <span class="ref-th-value">15 µg/m³</span>
+              <span class="ref-th-note">Air Quality Guideline (health-based)</span>
+            </div>
+            <div class="ref-threshold-card">
+              <span class="ref-th-label">WHO 2021 — annual PM<sub>2.5</sub></span>
+              <span class="ref-th-value">5 µg/m³</span>
+              <span class="ref-th-note">Long-term exposure guideline</span>
+            </div>
+            <div class="ref-threshold-card">
+              <span class="ref-th-label">US EPA — 24-hour NAAQS</span>
+              <span class="ref-th-value">35 µg/m³</span>
+              <span class="ref-th-note">Regulatory standard</span>
+            </div>
+            <div class="ref-threshold-card">
+              <span class="ref-th-label">US EPA — annual NAAQS (2024)</span>
+              <span class="ref-th-value">9.0 µg/m³</span>
+              <span class="ref-th-note">Strengthened from 12.0 in 2024</span>
+            </div>
+          </div>
+
+          <ol class="reference-list">
+            <li>
+              <strong>Barkjohn, K.K., Gantt, B., &amp; Clements, A.L. (2021).</strong>
+              Development and application of a United States-wide correction for PM<sub>2.5</sub> data collected with the PurpleAir sensor.
+              <em>Atmospheric Measurement Techniques, 14</em>(6), 4617–4637.
+              <a href="https://doi.org/10.5194/amt-14-4617-2021" target="_blank" rel="noopener">doi:10.5194/amt-14-4617-2021</a>
+              <span class="ref-use">Used for the default humidity-corrected PM<sub>2.5</sub> equation.</span>
+            </li>
+            <li>
+              <strong>World Health Organization (2021).</strong>
+              WHO global air quality guidelines: particulate matter (PM<sub>2.5</sub> and PM<sub>10</sub>), ozone, nitrogen dioxide, sulfur dioxide and carbon monoxide. Geneva: WHO.
+              <a href="https://www.who.int/publications/i/item/9789240034228" target="_blank" rel="noopener">who.int</a>
+              <span class="ref-use">Source of the WHO 15 µg/m³ health threshold.</span>
+            </li>
+            <li>
+              <strong>U.S. Environmental Protection Agency (2024).</strong>
+              National Ambient Air Quality Standards (NAAQS) for Particulate Matter — Final Reconsideration.
+              <a href="https://www.epa.gov/pm-pollution/national-ambient-air-quality-standards-naaqs-pm" target="_blank" rel="noopener">epa.gov</a>
+              <span class="ref-use">Source of the EPA 35 µg/m³ (24-h) and 9.0 µg/m³ (annual) standards.</span>
+            </li>
+            <li>
+              <strong>Cleveland, R.B., Cleveland, W.S., McRae, J.E., &amp; Terpenning, I. (1990).</strong>
+              STL: A Seasonal-Trend Decomposition Procedure Based on Loess.
+              <em>Journal of Official Statistics, 6</em>(1), 3–73.
+              <span class="ref-use">Basis of the trend / seasonality / residual decomposition.</span>
+            </li>
+            <li>
+              <strong>Lane Regional Air Protection Agency (LRAPA).</strong> PurpleAir correction factor.
+              &nbsp;·&nbsp;
+              <strong>Sayahi, T., Butterfield, A., &amp; Kelly, K.E. (AQ&amp;U, Univ. of Utah).</strong> Low-cost sensor calibration.
+              <span class="ref-use">Alternative correction formulas offered in the comparison panel.</span>
+            </li>
+            <li>
+              <strong>U.S. EPA (2021).</strong> AirNow Fire and Smoke Map — PurpleAir sensor correction methodology.
+              <a href="https://www.airnow.gov/aqi/aqi-basics/" target="_blank" rel="noopener">airnow.gov</a>
+              <span class="ref-use">Reference implementation of sensor correction for public reporting.</span>
+            </li>
+          </ol>
+          <p class="reference-footnote">Air quality categories on this platform are expressed against health-based PM<sub>2.5</sub> mass thresholds (WHO / EPA) rather than a single AQI index, to preserve the underlying concentration and its uncertainty.</p>
         </section>
 
         <section class="section timeframe-selector">
@@ -537,7 +605,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260612a"></script>
+    <script src="/static/app.js?v=20260703a"></script>
 
     <footer class="site-footer">
       <div class="footer-inner">

@@ -287,6 +287,75 @@ h2 {
   margin-top: 6px;
 }
 
+/* ── Methods & Standards (citations) ──────────────────────────────────── */
+.methods-references {
+  background: linear-gradient(135deg, rgba(31, 122, 140, 0.04) 0%, rgba(31, 122, 140, 0.02) 100%);
+  border: 1px solid rgba(31, 122, 140, 0.1);
+}
+.reference-thresholds {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin: 8px 0 24px;
+}
+.ref-threshold-card {
+  background: white;
+  border-radius: 12px;
+  padding: 16px 18px;
+  border-left: 4px solid var(--accent);
+  box-shadow: 0 4px 12px var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ref-th-label {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+}
+.ref-th-value {
+  font-size: 1.55rem;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.1;
+}
+.ref-th-note {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.reference-list {
+  margin: 0;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.reference-list li {
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.reference-list li a {
+  color: var(--accent);
+  word-break: break-word;
+}
+.reference-list .ref-use {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-style: italic;
+}
+.reference-footnote {
+  margin: 22px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid rgba(31, 122, 140, 0.12);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
 .detected-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -935,11 +1004,13 @@ tr:hover {
 .dashboard > .downloads           { order: 70; }
 .dashboard > .timeframe-selector  { order: 80; }
 .dashboard > .quality-methodology { order: 90; }
+.dashboard > .methods-references  { order: 95; }
 .dashboard > .detected            { order: 100; }
 .dashboard > .anomalies           { order: 110; }
 
 /* A subtle "reference" treatment for the lower informational sections */
 .dashboard > .quality-methodology,
+.dashboard > .methods-references,
 .dashboard > .detected {
   opacity: 0.96;
 }

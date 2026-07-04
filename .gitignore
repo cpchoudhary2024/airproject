@@ -35,6 +35,24 @@ report_*.pdf
 # Raw data files (large binary/csv - not needed in repo)
 *.xlsx
 0-Minute*.csv
+# PurpleAir raw exports (e.g. "291796 2026-02-20 ... 0-Minute Average.csv")
+*0-Minute Average.csv
+*Average.csv
+purple airs raw data*/
+air reports community*/
+
+# Local report-generation scripts, evidence, and generated assets (not part of the deployed app)
+build_reports.py
+compute_and_plot.py
+evidence.json
+report_assets/
+COMPARISON_ANALYSIS_REPORT.md
+Welcome file*.md
+*.pdf
+
+# Claude working docs
+CLAUDE.md
+CLAUDE copy.md
 
 # VS Code
 .vscode/
