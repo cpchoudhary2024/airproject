@@ -286,10 +286,9 @@ function buildDetectedColumns(detected) {
 function buildTables(tables) {
   const statsContainer = document.getElementById('table-stats');
   const exceedContainer = document.getElementById('table-exceedances');
-  const eventsContainer = document.getElementById('table-events');
   const highestContainer = document.getElementById('table-highest-events');
 
-  if (!statsContainer || !exceedContainer || !eventsContainer) {
+  if (!statsContainer || !exceedContainer) {
     console.error('One or more table containers not found');
     return;
   }
@@ -301,13 +300,6 @@ function buildTables(tables) {
       <tr><th>EPA 35 µg/m³ hours</th><td>${tables.exceedances.epa_35}</td></tr>
     </table>
   `;
-  const eventsHtml = buildTable(tables.events);
-  eventsContainer.innerHTML = eventsHtml.includes('<table>')
-    ? `<div class="event-type-legend compact">` +
-        `<span class="event-type-badge spike">Spike</span> sudden surge &nbsp;|&nbsp; ` +
-        `<span class="event-type-badge sustained">Sustained</span> 3+ hrs elevated` +
-      `</div><div class="table-scroll">${eventsHtml}</div>`
-    : eventsHtml;
 
   if (highestContainer) {
     if (tables.highest_events && tables.highest_events.length > 0) {
