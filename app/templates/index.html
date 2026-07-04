@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
     <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260703e" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260703f" />
   </head>
   <body>
     <div class="app">
@@ -126,6 +126,7 @@
               <input id="file-input" type="file" accept=".csv,.xlsx" />
             </label>
           </div>
+          <p class="meta"><strong>No file yet?</strong> In the PurpleAir dashboard, open your sensor → <em>Download Data</em> → export a CSV or XLSX (0-, 2-, or 10-minute average — all work).</p>
           <p class="meta">One file per analysis. Dual-sensor setups are detected automatically. To compare multiple houses, run one analysis first, then use the <strong>Compare Houses</strong> panel.</p>
           <div id="loading" class="loading hidden">
             <div class="spinner"></div>
@@ -575,7 +576,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260703e"></script>
+    <script src="/static/app.js?v=20260703f"></script>
 
     <footer class="site-footer">
       <div class="footer-inner">

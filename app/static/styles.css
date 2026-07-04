@@ -254,39 +254,6 @@ h2 {
   border: 1px solid rgba(31, 122, 140, 0.1);
 }
 
-.methodology-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 20px;
-}
-
-.methodology-card {
-  background: white;
-  border-radius: 12px;
-  padding: 20px;
-  border-left: 4px solid var(--accent);
-  box-shadow: 0 4px 12px var(--shadow);
-}
-
-.methodology-card h3 {
-  margin: 0 0 12px 0;
-  font-size: 0.95rem;
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.methodology-card p {
-  margin: 8px 0;
-  font-size: 0.9rem;
-  color: var(--ink);
-}
-
-.methodology-card p.small {
-  font-size: 0.8rem;
-  color: var(--muted);
-  margin-top: 6px;
-}
-
 /* ── Methods & Standards (citations) ──────────────────────────────────── */
 .methods-references {
   background: linear-gradient(135deg, rgba(31, 122, 140, 0.04) 0%, rgba(31, 122, 140, 0.02) 100%);
@@ -1665,55 +1632,18 @@ tr:hover {
   line-height: 1.5;
 }
 
-/* Scientific-rigor panel (Tier 1–3) */
-.repro-footer {
-  margin: 14px 2px 0;
-  padding-top: 12px;
-  border-top: 1px dashed var(--border, #d9d2c7);
-  font-size: 0.78rem;
-  color: var(--muted, #6d6256);
-  line-height: 1.6;
+/* ── Mobile / responsive refinements ──────────────────────────────────── */
+@media (max-width: 640px) {
+  .hero { padding: 20px 16px; }
+  .app { padding-left: 12px; padding-right: 12px; }
+  .cards { grid-template-columns: 1fr 1fr; }
+  .card-value { font-size: 1.15rem; }
+  .section { padding: 18px 14px; }
+  .device-info-row { flex-direction: column; }
+  .table-scroll { overflow-x: auto; }
+  h1 { font-size: 1.5rem; }
+  h2 { font-size: 1.15rem; }
 }
-.repro-footer code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: rgba(31, 122, 140, 0.10);
-  color: #1f7a8c;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 0.82rem;
-}
-
-/* Location-based (opt-in network) features */
-.optional-badge {
-  font-size: 0.62rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  vertical-align: middle;
-  background: rgba(31, 122, 140, 0.12);
-  color: #1f7a8c;
-  padding: 2px 8px;
-  border-radius: 999px;
-  margin-left: 8px;
-}
-.privacy-note {
-  border-left: 3px solid #1f7a8c;
-  padding-left: 12px;
-}
-.location-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin: 14px 0 4px;
-}
-.location-result {
-  margin-top: 18px;
-}
-.location-result-title {
-  font-size: 1rem;
-  margin: 6px 0 10px;
-}
-.btn.secondary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+@media (max-width: 380px) {
+  .cards { grid-template-columns: 1fr; }
 }
