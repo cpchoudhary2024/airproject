@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
     <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260703a" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260703c" />
   </head>
   <body>
     <div class="app">
@@ -221,6 +221,36 @@
           <h2>Overview</h2>
           <div id="overview-cards" class="cards"></div>
           <div id="quality-narrative" class="quality-narrative hidden"></div>
+        </section>
+
+        <section class="section rigor hidden" id="rigor-section">
+          <h2>Scientific Rigor</h2>
+          <p class="section-note">The evidence chain behind the numbers: a statistical trend test, human-exposure burden, honest measurement uncertainty, and a reproducibility ID that pins the exact data + methods used.</p>
+          <div id="rigor-cards" class="cards"></div>
+          <p id="repro-footer" class="repro-footer"></p>
+        </section>
+
+        <section class="section location-features hidden" id="location-section">
+          <h2>Location-Based Analysis <span class="optional-badge">optional</span></h2>
+          <p class="section-note privacy-note" id="location-note">
+            These optional checks send <strong>only this sensor's coordinates and date range</strong> to an external
+            service to add source and regulatory context. Your PM2.5 readings never leave your session. Nothing runs
+            until you click a button below.
+          </p>
+          <div class="location-actions">
+            <button class="btn secondary" id="btn-ref-validate" type="button">
+              Compare to nearest regulatory monitor →
+            </button>
+            <button class="btn secondary" id="btn-pollution-rose" type="button">
+              Build pollution rose (wind × PM2.5) →
+            </button>
+          </div>
+          <div id="ref-result" class="location-result hidden"></div>
+          <div id="rose-result" class="location-result hidden">
+            <h3 class="location-result-title">Pollution Rose — which direction does pollution arrive from?</h3>
+            <p class="section-note" id="rose-note"></p>
+            <div class="chart" id="chart-pollution-rose"></div>
+          </div>
         </section>
 
         <section class="section narrative-section">
@@ -605,7 +635,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260703a"></script>
+    <script src="/static/app.js?v=20260703c"></script>
 
     <footer class="site-footer">
       <div class="footer-inner">

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -8,12 +9,14 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from .analysis import analyze_dataset, build_comparison_pdf, build_public_report_pdf
+
+logger = logging.getLogger("pair_analyzer")
 
 APP_ROOT = Path(__file__).resolve().parent
 # DATA_DIR env var lets any deployment (HF Spaces, Docker, Vercel) set the writable path.
@@ -26,6 +29,46 @@ app = FastAPI(title="PurpleAir Local Analyzer")
 app.mount("/static", StaticFiles(directory=str(APP_ROOT / "static")), name="static")
 
 
+# Content-Security-Policy: lock the page down to same-origin resources plus the
+# one third-party we actually load (Plotly from its CDN). Inline styles/scripts
+# used by the template are permitted; no external connect/frame targets.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.plot.ly; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("Content-Security-Policy", _CSP)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
+    )
+    return response
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all so an unexpected error never leaks a stack trace to the client."""
+    err_id = uuid.uuid4().hex[:8]
+    logger.exception("[%s] Unhandled error on %s %s: %s", err_id, request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error (error id: {err_id})"},
+    )
+
+
 _UUID_DIR_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -34,6 +77,67 @@ _UUID_DIR_RE = re.compile(
 
 def _is_uuid_dir(dir_path: Path) -> bool:
     return bool(_UUID_DIR_RE.match(dir_path.name))
+
+
+# Only these characters are ever accepted in a download `kind` — no dots, no
+# path separators — which by construction makes traversal via `kind` impossible.
+_SAFE_KIND_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Maximum accepted upload size (per file). Overridable per-deployment.
+_DEFAULT_MAX_UPLOAD_MB = 50
+
+
+def _max_upload_bytes() -> int:
+    mb = _parse_int_env("PAIR_ANALYZER_MAX_UPLOAD_MB")
+    if mb is None or mb <= 0:
+        mb = _DEFAULT_MAX_UPLOAD_MB
+    return mb * 1024 * 1024
+
+
+def _resolve_job_dir(file_id: str) -> Path:
+    """Validate a job id and return its resolved directory, or raise 404.
+
+    Guards against path traversal: the id must be a canonical UUID (matching the
+    same pattern used to name job dirs) and the resolved directory must be a
+    direct child of DATA_ROOT. Anything else is reported as an unknown id so we
+    never disclose whether an out-of-tree path exists.
+    """
+    if not isinstance(file_id, str) or not _UUID_DIR_RE.match(file_id):
+        raise HTTPException(status_code=404, detail="Unknown analysis id")
+    data_root = DATA_ROOT.resolve()
+    resolved = (data_root / file_id).resolve()
+    if resolved.parent != data_root or not resolved.is_dir():
+        raise HTTPException(status_code=404, detail="Unknown analysis id")
+    return resolved
+
+
+def _safe_job_file(job_dir: Path, name: str) -> Path | None:
+    """Resolve `name` inside `job_dir`, refusing anything that escapes the dir.
+
+    Returns the resolved path only if it stays within `job_dir` and is a regular
+    file; otherwise None. Used as defense-in-depth even for server-generated
+    filenames so a poisoned summary.json can never point outside the job dir.
+    """
+    if not name or "\x00" in name:
+        return None
+    base = job_dir.resolve()
+    candidate = (base / name).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _log_and_500(exc: Exception, context: str) -> HTTPException:
+    """Log the full error server-side and return a generic client-facing 500.
+
+    Never leaks stack traces or internal exception text to the client; instead
+    returns a short correlation id the user can quote in a bug report.
+    """
+    err_id = uuid.uuid4().hex[:8]
+    logger.exception("[%s] %s: %s", err_id, context, exc)
+    return HTTPException(status_code=500, detail=f"{context} failed (error id: {err_id})")
 
 
 def _parse_int_env(var_name: str) -> int | None:
@@ -129,15 +233,37 @@ async def _run_analysis_job(file: UploadFile, *, generate_outputs: bool = True, 
     job_dir = DATA_ROOT / file_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
+    # Stream the upload to disk in chunks with a hard size cap so a large (or
+    # maliciously huge) file can never exhaust memory or fill the disk.
+    max_bytes = _max_upload_bytes()
     raw_path = job_dir / f"raw{ext}"
-    with raw_path.open("wb") as f:
-        f.write(await file.read())
+    total = 0
+    try:
+        with raw_path.open("wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    f.close()
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large (limit {max_bytes // (1024 * 1024)} MB)",
+                    )
+                f.write(chunk)
+    finally:
+        await file.close()
+
+    if total == 0:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
     try:
         result, outputs = analyze_dataset(raw_path, job_dir, generate_outputs=generate_outputs, metadata=metadata)
     except Exception as exc:
-        import traceback
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}\n{traceback.format_exc()}")
+        raise _log_and_500(exc, "Analysis")
 
     # Store summary payload with outputs for reuse or debugging.
     summary_data = result.copy()
@@ -220,6 +346,13 @@ async def analyze_multi(
             }
         )
 
+    # Difference-in-differences: quantify each house's excess vs the control.
+    from .analysis import attach_did_to_analyses
+    try:
+        attach_did_to_analyses(analyses)
+    except Exception as exc:
+        logger.warning("DiD computation skipped: %s", exc)
+
     # Run cleanup once so we never delete jobs from this batch.
     _cleanup_data_root(keep_dirs=keep_dirs)
 
@@ -234,9 +367,7 @@ def export_to_word(file_id: str) -> FileResponse:
     from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
     import pandas as pd
     
-    job_dir = DATA_ROOT / file_id
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="Analysis not found")
+    job_dir = _resolve_job_dir(file_id)
     
     # Load summary.json
     summary_path = job_dir / "summary.json"
@@ -247,7 +378,7 @@ def export_to_word(file_id: str) -> FileResponse:
         with summary_path.open("r", encoding="utf-8") as f:
             summary_data = json.load(f)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read summary: {str(e)}")
+        raise _log_and_500(e, "Reading summary")
     
     try:
         # Create Word document
@@ -535,7 +666,7 @@ def export_to_word(file_id: str) -> FileResponse:
         return FileResponse(path=str(word_path), filename="report_analysis.docx")
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Word export failed: {str(e)}")
+        raise _log_and_500(e, "Word export")
 
 
 @app.post("/api/community_report/{file_id}")
@@ -548,9 +679,7 @@ async def regenerate_community_report(
     import io, tempfile, pandas as pd
     from pathlib import Path as _P
 
-    job_dir = DATA_ROOT / file_id
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="Unknown analysis id")
+    job_dir = _resolve_job_dir(file_id)
     summary_path = job_dir / "summary.json"
     if not summary_path.exists():
         raise HTTPException(status_code=404, detail="Analysis data not found")
@@ -641,7 +770,7 @@ async def community_report_with_comparison(payload: dict) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Provide the Control House plus at least one other house")
 
     control_id = file_ids[0]
-    job_dir = DATA_ROOT / control_id
+    job_dir = _resolve_job_dir(control_id)
     summary_path = job_dir / "summary.json"
     if not summary_path.exists():
         raise HTTPException(status_code=404, detail="Control House analysis not found")
@@ -675,7 +804,10 @@ async def community_report_with_comparison(payload: dict) -> StreamingResponse:
     # Build the comparison list (each house's rolling_median from its summary.json)
     comparison = []
     for i, fid in enumerate(file_ids):
-        sp = DATA_ROOT / fid / "summary.json"
+        try:
+            sp = _resolve_job_dir(fid) / "summary.json"
+        except HTTPException:
+            continue
         if not sp.exists():
             continue
         try:
@@ -713,9 +845,13 @@ async def community_report_with_comparison(payload: dict) -> StreamingResponse:
 
 @app.get("/api/download/{file_id}/{kind}")
 def download(file_id: str, kind: str) -> FileResponse:
-    job_dir = DATA_ROOT / file_id
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="Unknown analysis id")
+    job_dir = _resolve_job_dir(file_id)
+
+    # `kind` is restricted to a safe charset (no dots, no separators) so it can
+    # never encode a path. Every candidate is additionally resolved through
+    # _safe_job_file, which refuses anything outside the job directory.
+    if not _SAFE_KIND_RE.match(kind):
+        raise HTTPException(status_code=404, detail="Download not found")
 
     # First, try to look up the actual filename from summary.json outputs mapping
     summary_path = job_dir / "summary.json"
@@ -723,26 +859,25 @@ def download(file_id: str, kind: str) -> FileResponse:
         try:
             with summary_path.open("r", encoding="utf-8") as f:
                 summary = json.load(f)
-                if "outputs" in summary and kind in summary["outputs"]:
-                    actual_filename = summary["outputs"][kind]
-                    file_path = job_dir / actual_filename
-                    if file_path.exists():
-                        return FileResponse(path=str(file_path), filename=actual_filename)
-        except Exception as e:
+            if isinstance(summary.get("outputs"), dict) and kind in summary["outputs"]:
+                file_path = _safe_job_file(job_dir, str(summary["outputs"][kind]))
+                if file_path is not None:
+                    return FileResponse(path=str(file_path), filename=file_path.name)
+        except Exception:
             pass  # Fall through to other methods
 
     # Try multiple file extensions (pdf, csv, json, docx, xlsx)
     for ext in ['.pdf', '.docx', '.csv', '.json', '.xlsx']:
-        file_path = job_dir / f"{kind}{ext}"
-        if file_path.exists():
-            return FileResponse(path=str(file_path), filename=f"{kind}{ext}")
-    
+        file_path = _safe_job_file(job_dir, f"{kind}{ext}")
+        if file_path is not None:
+            return FileResponse(path=str(file_path), filename=file_path.name)
+
     # If not found with extensions, try exact name
-    file_path = job_dir / kind
-    if file_path.exists():
-        return FileResponse(path=str(file_path), filename=kind)
-    
-    raise HTTPException(status_code=404, detail=f"Download not found: {kind}")
+    file_path = _safe_job_file(job_dir, kind)
+    if file_path is not None:
+        return FileResponse(path=str(file_path), filename=file_path.name)
+
+    raise HTTPException(status_code=404, detail="Download not found")
 
 
 @app.post("/api/refine-analysis/{file_id}")
@@ -750,9 +885,7 @@ async def refine_analysis(file_id: str, date_from: str, date_to: str) -> dict:
     """Reanalyze data for a specific timeframe."""
     import pandas as pd
     
-    job_dir = DATA_ROOT / file_id
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="Unknown analysis id")
+    job_dir = _resolve_job_dir(file_id)
     
     # Find the raw data file
     raw_files = list(job_dir.glob("raw.*"))
@@ -766,14 +899,18 @@ async def refine_analysis(file_id: str, date_from: str, date_to: str) -> dict:
         ts_from = pd.Timestamp(date_from)
         ts_to = pd.Timestamp(date_to)
         window = (ts_from, ts_to)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid date format: {str(e)}")
-    
-    # Create a new subdirectory for this refined analysis
-    date_suffix = f"{date_from.replace('T', '-').replace(':', '')[:13]}_{date_to.replace('T', '-').replace(':', '')[:13]}"
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format")
+
+    if pd.isna(ts_from) or pd.isna(ts_to):
+        raise HTTPException(status_code=400, detail="Invalid date format")
+
+    # Build the subdirectory name from the *parsed* timestamps (never raw user
+    # input) so the folder name can't smuggle path separators or "..".
+    date_suffix = f"{ts_from.strftime('%Y%m%dT%H')}_{ts_to.strftime('%Y%m%dT%H')}"
     refine_dir = job_dir / f"refined_{date_suffix}"
     refine_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Run analysis with the specified time window
     try:
         result, outputs = analyze_dataset(raw_path, job_dir, window=window, output_dir=refine_dir)
@@ -787,7 +924,7 @@ async def refine_analysis(file_id: str, date_from: str, date_to: str) -> dict:
 
         return {"file_id": file_id, "result": result, "outputs": outputs, "refine_dir": str(refine_dir.name)}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Refinement failed: {str(e)}")
+        raise _log_and_500(e, "Refinement")
 
 
 @app.post("/api/generate-report/{file_id}")
@@ -795,9 +932,7 @@ async def generate_custom_report(file_id: str, payload: dict) -> FileResponse:
     """Regenerate PDF with custom notes and stored analysis parameters."""
     from .analysis import build_report_pdf
 
-    job_dir = DATA_ROOT / file_id
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="Analysis not found")
+    job_dir = _resolve_job_dir(file_id)
 
     summary_path = job_dir / "summary.json"
     if not summary_path.exists():
@@ -807,7 +942,7 @@ async def generate_custom_report(file_id: str, payload: dict) -> FileResponse:
         with summary_path.open("r", encoding="utf-8") as f:
             stored = json.load(f)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read summary: {e}")
+        raise _log_and_500(e, "Reading summary")
 
     custom_notes = payload.get("custom_notes") or []
 
@@ -868,7 +1003,7 @@ async def generate_custom_report(file_id: str, payload: dict) -> FileResponse:
             highest_events=highest_events,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
+        raise _log_and_500(e, "PDF generation")
 
     return FileResponse(path=str(report_path), filename="report_analysis.pdf", media_type="application/pdf")
 
@@ -885,10 +1020,10 @@ async def generate_compare_report(payload: dict) -> FileResponse:
 
     analyses: list[dict] = []
     for i, fid in enumerate(file_ids):
-        job_dir = DATA_ROOT / fid
+        job_dir = _resolve_job_dir(fid)
         summary_path = job_dir / "summary.json"
         if not summary_path.exists():
-            raise HTTPException(status_code=404, detail=f"Analysis not found: {fid}")
+            raise HTTPException(status_code=404, detail="Analysis not found")
         try:
             with summary_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -901,17 +1036,211 @@ async def generate_compare_report(payload: dict) -> FileResponse:
                 "is_control": i == 0,  # file_ids arrive control-first from the UI
             })
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to read analysis {fid}: {e}")
+            raise _log_and_500(e, "Reading analysis")
 
     if not filenames or len(filenames) < len(file_ids):
         filenames = [a["label"] for a in analyses]
 
     # Write comparison PDF to a temp dir associated with the first job
-    out_dir = DATA_ROOT / file_ids[0]
+    out_dir = _resolve_job_dir(file_ids[0])
     report_path = out_dir / "comparison_report.pdf"
     try:
         build_comparison_pdf(report_path, analyses, filenames)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+        raise _log_and_500(e, "PDF generation")
 
     return FileResponse(path=str(report_path), filename="comparison_report.pdf", media_type="application/pdf")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Opt-in network features (Tier 1). OFF by default: no outbound request is made
+# until the user explicitly calls these routes. Only the sensor's coordinates
+# and date window are sent to fixed external services — never PM2.5 data.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_summary(job_dir: Path) -> dict:
+    summary_path = job_dir / "summary.json"
+    if not summary_path.exists():
+        raise HTTPException(status_code=404, detail="Analysis summary not found")
+    try:
+        with summary_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        raise _log_and_500(e, "Reading summary")
+
+
+def _sensor_coords(summary: dict) -> tuple[float, float]:
+    s = summary.get("summary", {}) if "summary" in summary else summary
+    lat, lon = s.get("latitude"), s.get("longitude")
+    if lat is None or lon is None:
+        raise HTTPException(
+            status_code=422,
+            detail="This dataset has no location (latitude/longitude) columns, so location-based features are unavailable.",
+        )
+    return float(lat), float(lon)
+
+
+def _load_sensor_hourly_utc(job_dir: Path):
+    """Return (hour_key -> pm25) dict from the UTC hourly output, or raise 404."""
+    import pandas as pd
+
+    path = _safe_job_file(job_dir, "sensor_hourly_utc.csv")
+    if path is None:
+        raise HTTPException(status_code=404, detail="Hourly sensor series unavailable for this analysis. Re-run the analysis.")
+    df = pd.read_csv(path)
+    series: dict[str, float] = {}
+    for _, row in df.iterrows():
+        key = str(row.get("utc_hour", ""))[:13]
+        val = row.get("pm25_corrected")
+        if key and pd.notna(val):
+            series[key] = float(val)
+    if not series:
+        raise HTTPException(status_code=404, detail="Hourly sensor series is empty.")
+    return series
+
+
+@app.post("/api/reference-validation/{file_id}")
+def reference_validation(file_id: str) -> dict:
+    """Compare the sensor against the nearest regulatory PM2.5 monitor (OpenAQ).
+
+    Opt-in: only the sensor's coordinates + date window are sent to OpenAQ.
+    Returns collocation statistics (bias, R², RMSE, slope) + paired points."""
+    import numpy as np
+    from .external import ExternalError, fetch_openaq_reference
+
+    job_dir = _resolve_job_dir(file_id)
+    summary = _load_summary(job_dir)
+    lat, lon = _sensor_coords(summary)
+    sensor = _load_sensor_hourly_utc(job_dir)
+
+    hours = sorted(sensor.keys())
+    start_date, end_date = hours[0][:10], hours[-1][:10]
+
+    try:
+        ref = fetch_openaq_reference(lat, lon, start_date, end_date)
+    except ExternalError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    ref_series = ref["series"]
+    common = [h for h in hours if h in ref_series]
+    if len(common) < 8:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Only {len(common)} overlapping hours with the reference monitor — too few for a reliable comparison.",
+        )
+    s_vals = np.array([sensor[h] for h in common], dtype=float)
+    r_vals = np.array([ref_series[h] for h in common], dtype=float)
+
+    diff = s_vals - r_vals
+    bias = float(np.mean(diff))
+    rmse = float(np.sqrt(np.mean(diff ** 2)))
+    mae = float(np.mean(np.abs(diff)))
+    if np.std(s_vals) > 0 and np.std(r_vals) > 0:
+        r = float(np.corrcoef(s_vals, r_vals)[0, 1])
+        r2 = r * r
+        slope, intercept = np.polyfit(r_vals, s_vals, 1)
+    else:
+        r2, slope, intercept = 0.0, float("nan"), float("nan")
+
+    return {
+        "monitor": {
+            "name": ref.get("location_name"),
+            "provider": ref.get("provider"),
+            "distance_km": round(ref["distance_m"] / 1000.0, 2) if ref.get("distance_m") is not None else None,
+            "latitude": ref.get("latitude"),
+            "longitude": ref.get("longitude"),
+        },
+        "stats": {
+            "n_hours": len(common),
+            "bias": round(bias, 2),
+            "rmse": round(rmse, 2),
+            "mae": round(mae, 2),
+            "r2": round(r2, 3),
+            "slope": round(float(slope), 3) if slope == slope else None,
+            "intercept": round(float(intercept), 3) if intercept == intercept else None,
+        },
+        "scatter": {"sensor": [round(v, 1) for v in s_vals.tolist()],
+                    "reference": [round(v, 1) for v in r_vals.tolist()]},
+        "timeseries": {
+            "hours": common,
+            "sensor": [round(sensor[h], 1) for h in common],
+            "reference": [round(ref_series[h], 1) for h in common],
+        },
+        "disclosure": "Only your sensor coordinates and date range were sent to OpenAQ; no PM2.5 data left this server.",
+    }
+
+
+@app.post("/api/pollution-rose/{file_id}")
+def pollution_rose(file_id: str) -> dict:
+    """Pollution rose: join Open-Meteo wind to the sensor's PM2.5 and bin by
+    wind direction to show which direction pollution arrives from.
+
+    Opt-in: only coordinates + date window are sent to Open-Meteo (no key)."""
+    import numpy as np
+    from .external import ExternalError, fetch_openmeteo_wind
+
+    job_dir = _resolve_job_dir(file_id)
+    summary = _load_summary(job_dir)
+    lat, lon = _sensor_coords(summary)
+    sensor = _load_sensor_hourly_utc(job_dir)
+
+    hours = sorted(sensor.keys())
+    start_date, end_date = hours[0][:10], hours[-1][:10]
+
+    try:
+        wind = fetch_openmeteo_wind(lat, lon, start_date, end_date)
+    except ExternalError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    # 16-point compass sectors.
+    labels = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+              "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    n_sec = 16
+    sums = [0.0] * n_sec
+    counts = [0] * n_sec
+    speeds = [0.0] * n_sec
+
+    matched = 0
+    for i, t in enumerate(wind["time"]):
+        key = str(t)[:13]
+        pm = sensor.get(key)
+        if pm is None:
+            continue
+        try:
+            direction = float(wind["direction"][i])
+            speed = float(wind["speed"][i])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if direction != direction:  # NaN
+            continue
+        # Sector centered on each compass point (N spans 348.75–11.25°).
+        sec = int(((direction % 360) + 11.25) // 22.5) % n_sec
+        sums[sec] += pm
+        speeds[sec] += speed
+        counts[sec] += 1
+        matched += 1
+
+    if matched < 8:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Only {matched} hours had both wind and PM2.5 data — too few to build a pollution rose.",
+        )
+
+    mean_pm = [round(sums[i] / counts[i], 2) if counts[i] else 0.0 for i in range(n_sec)]
+    mean_speed = [round(speeds[i] / counts[i], 1) if counts[i] else 0.0 for i in range(n_sec)]
+    total_pm = sum(sums)
+    weighted_pct = [round(100.0 * sums[i] / total_pm, 1) if total_pm > 0 else 0.0 for i in range(n_sec)]
+    dominant = int(np.argmax(sums)) if total_pm > 0 else None
+
+    return {
+        "sectors": labels,
+        "angles_deg": [i * 22.5 for i in range(n_sec)],
+        "mean_pm25": mean_pm,
+        "mean_wind_speed": mean_speed,
+        "hours_per_sector": counts,
+        "pm_share_pct": weighted_pct,
+        "dominant_sector": labels[dominant] if dominant is not None else None,
+        "wind_units": wind.get("units", "km/h"),
+        "n_hours": matched,
+        "disclosure": "Only your sensor coordinates and date range were sent to Open-Meteo; no PM2.5 data left this server.",
+    }

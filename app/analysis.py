@@ -2388,6 +2388,63 @@ def build_report_pdf(
         draw_wrapped(definition, indent=36, font_size=8, color=(0.25, 0.25, 0.25))
     y -= 6
 
+    # ── Section 4b: Statistical Trend, Uncertainty & Exposure ────────────────
+    _tt = summary.get("trend_test")
+    _un = summary.get("uncertainty")
+    _ex = summary.get("exposure")
+    _rp = summary.get("repro")
+    if _tt or _un or _ex or _rp:
+        section_header("4b.", "Statistical Trend, Uncertainty & Exposure")
+        if _tt:
+            draw_line("Trend test (Mann-Kendall · Theil-Sen · Pettitt):", indent=12, font_size=10, bold=True)
+            _ci = _tt.get("sen_slope_ci") or ["N/A", "N/A"]
+            draw_line(
+                f"Theil-Sen slope: {_tt.get('sen_slope_per_year')} µg/m³ per year "
+                f"(95% CI {_ci[0]} to {_ci[1]})", indent=24, font_size=9)
+            draw_line(
+                f"Mann-Kendall: τ = {_tt.get('tau')}, p = {_tt.get('p_value')} — {_tt.get('direction')}"
+                f" ({'statistically significant' if _tt.get('significant') else 'not significant'} at α=0.05)",
+                indent=24, font_size=9)
+            if _tt.get("change_point_date"):
+                draw_line(f"Change-point (Pettitt): {_tt.get('change_point_date')} "
+                          f"(p = {_tt.get('change_point_p')})", indent=24, font_size=9)
+            else:
+                draw_line(f"Change-point (Pettitt): none detected (p = {_tt.get('change_point_p')})",
+                          indent=24, font_size=9)
+            y -= 4
+        if _un and _un.get("mean_ci_halfwidth") is not None:
+            draw_line("Measurement uncertainty:", indent=12, font_size=10, bold=True)
+            draw_wrapped(
+                f"Reported PM2.5 carries a mean 95% confidence interval of ±{_un.get('mean_ci_halfwidth')} µg/m³, "
+                f"derived by combining {_un.get('method')}. Uncertainty bands are drawn on the temporal-trend "
+                f"chart. Honest, source-quantified uncertainty distinguishes these results from a single-number "
+                f"dashboard reading.",
+                indent=24, font_size=9, color=(0.30, 0.30, 0.30))
+            y -= 2
+        if _ex:
+            draw_line("Exposure & health burden:", indent=12, font_size=10, bold=True)
+            draw_line(
+                f"Cumulative exposure: {_ex.get('cumulative_ug_hours')} µg·hours over "
+                f"{_ex.get('exposure_hours')} h.", indent=24, font_size=9)
+            draw_line(
+                f"Days above WHO 15: {_ex.get('days_over_who15')} of {_ex.get('n_days')} "
+                f"(EPA 35: {_ex.get('days_over_epa35')} days).", indent=24, font_size=9)
+            if _ex.get("excess_mortality_risk_pct") is not None:
+                draw_wrapped(
+                    f"Illustrative long-term excess-mortality risk: +{_ex.get('excess_mortality_risk_pct')}% "
+                    f"(WHO/GBD log-linear RR≈1.08 per 10 µg/m³, relative to the WHO 15 µg/m³ guideline). "
+                    f"This is an illustrative population estimate, not a clinical prediction.",
+                    indent=24, font_size=9, color=(0.30, 0.30, 0.30))
+            y -= 6
+        if _rp and _rp.get("repro_id"):
+            draw_line("Reproducibility:", indent=12, font_size=10, bold=True)
+            draw_wrapped(
+                f"Reproducibility ID {_rp.get('repro_id')} — a SHA-256 fingerprint of the exact input data "
+                f"combined with the method/version set used ({(_rp.get('method_versions') or {}).get('app_version', '')}). "
+                f"Quote this ID to reproduce or independently audit every figure in this report.",
+                indent=24, font_size=9, color=(0.30, 0.30, 0.30))
+            y -= 6
+
     # ── Section 5: Key Findings ───────────────────────────────────────────────
 
     section_header("5.", "Key Findings")
@@ -3662,6 +3719,26 @@ def build_public_report_pdf(
          "This is a Community Summary Report with no statistical jargon. For full methodology, "
          "sensor drift analysis, and quality-control charts, see the Research Report."),
     ]
+    # Plain-language exposure burden + uncertainty + reproducibility (additive).
+    _ex_c = summary.get("exposure")
+    if _ex_c and _ex_c.get("n_days") is not None:
+        INFO.insert(4, (
+            "Days above the guideline",
+            f"On {_ex_c.get('days_over_who15')} of {_ex_c.get('n_days')} days, the daily average was above "
+            f"the WHO safe guideline of 15 µg/m³ ({_ex_c.get('days_over_epa35')} day(s) above the US EPA "
+            f"35 µg/m³ standard)."))
+    _un_c = summary.get("uncertainty")
+    if _un_c and _un_c.get("mean_ci_halfwidth") is not None:
+        INFO.insert(5, (
+            "Measurement uncertainty",
+            f"Each reading is accurate to about ±{_un_c.get('mean_ci_halfwidth')} µg/m³ (95% confidence). "
+            f"Showing this range honestly is more scientific than a single number with no error."))
+    _rp_c = summary.get("repro")
+    if _rp_c and _rp_c.get("repro_id"):
+        INFO.append((
+            "Reproducibility ID",
+            f"{_rp_c.get('repro_id')} — a unique fingerprint of your data + the methods used, so anyone can "
+            f"reproduce or check these results."))
     LBL_W = 132   # label column width
     VAL_X = LM + LBL_W + 8
     VAL_W = UW - LBL_W - 12
@@ -4052,6 +4129,35 @@ def build_comparison_pdf(
     pdf.setFillColorRGB(0, 0, 0)
     y -= 16
 
+    # ── Section: Difference-in-differences (statistical excess vs Control) ────
+    try:
+        attach_did_to_analyses(analyses)
+        _did_rows = []
+        for idx, (a, fname) in enumerate(zip(analyses, filenames)):
+            if idx == 0:
+                continue
+            did = a.get("did")
+            if not did or did.get("excess_pct") is None:
+                continue
+            name = a.get("label") or fname or f"House {idx}"
+            ci = did.get("excess_ci_pct") or ["N/A", "N/A"]
+            sign = "+" if did["excess_pct"] > 0 else ""
+            sig = "significant" if did.get("significant") else "not significant"
+            _did_rows.append(
+                f"{name}: {sign}{did['excess_pct']}% excess vs Control "
+                f"(95% CI {ci[0]}% to {ci[1]}%, p={did.get('p_value')}, {sig}; n={did.get('n_paired')})")
+        if _did_rows:
+            _section("Local Excess vs Control — Difference-in-Differences")
+            _wrapped("Quantifies each house's PM2.5 excess relative to the Control House on their "
+                     "overlapping hours, with a 95% confidence interval and significance test — a "
+                     "defensible alternative to eyeballing two lines.", size=8.5, color=(0.30, 0.30, 0.30))
+            y -= 2
+            for _r in _did_rows:
+                _line(_r, size=9, indent=10)
+            y -= 12
+    except Exception:
+        pass
+
     # ── Section 2b: House comparison charts (1h + 24h median) ────────────────
     _HOUSE_COLORS = ["#1f7a8c", "#e07a5f", "#f6aa1c", "#4c956c", "#8f3f97",
                      "#ff7e00", "#2a9d8f", "#c1121f", "#6a4c93"]
@@ -4260,6 +4366,293 @@ def build_comparison_pdf(
     for _p in _tmp_charts:
         try: _os3.unlink(_p)
         except Exception: pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scientific-rigor add-ons (Tier 1–3): uncertainty, trend testing, exposure
+# burden, and reproducibility provenance. Each is self-contained (scipy/pandas
+# only) and attaches to the analysis result without changing existing outputs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Method/version identifiers folded into the reproducibility hash so a given
+# Repro-ID uniquely pins the exact computation that produced a result.
+METHOD_VERSIONS = {
+    "correction_default": "barkjohn_2021",
+    "correction_formula": "0.534*PA_cf1 - 0.0844*RH + 5.604",
+    "lrapa": "0.5*PA_cf1 - 0.66",
+    "aqu": "0.778*PA_cf1 + 2.65",
+    "who_pm25_guideline": 15.0,
+    "epa_pm25_naaqs_24h": 35.0,
+    "trend_test": "mann_kendall+theil_sen+pettitt",
+    "uncertainty": "channel_cv (+) barkjohn_rmse quadrature 95%",
+    "exposure": "ug_hours+who/epa_exceedance_days+who_gbd_rr",
+    "app_version": "2026.07",
+}
+
+# Barkjohn et al. (2021) national correction residual error (RMSE of corrected
+# PurpleAir PM2.5 vs FRM/FEM), used as the correction-error term of the
+# measurement-uncertainty band. Conservative published value (1σ, µg/m³).
+BARKJOHN_RMSE = 3.0
+
+
+def compute_repro_hash(file_path: Path, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Court-grade provenance: SHA-256 over the raw input bytes + frozen method
+    versions (+ optional analysis parameters). The short ``repro_id`` is stamped
+    on every report so any result is auditable and reproducible."""
+    import hashlib
+    import json as _json
+
+    data_hash: Optional[str] = None
+    try:
+        h = hashlib.sha256()
+        with open(file_path, "rb") as fh:
+            for block in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(block)
+        data_hash = h.hexdigest()
+    except Exception:
+        data_hash = None
+
+    method_blob = _json.dumps(METHOD_VERSIONS, sort_keys=True).encode("utf-8")
+    combo = hashlib.sha256()
+    if data_hash:
+        combo.update(data_hash.encode("utf-8"))
+    combo.update(method_blob)
+    if extra:
+        combo.update(_json.dumps(extra, sort_keys=True, default=str).encode("utf-8"))
+    full = combo.hexdigest()
+    return {
+        "repro_id": full[:16],
+        "data_sha256": data_hash,
+        "method_sha256": hashlib.sha256(method_blob).hexdigest()[:16],
+        "method_versions": METHOD_VERSIONS,
+        "full_sha256": full,
+    }
+
+
+def build_uncertainty(pm_series: pd.Series, channel_agreement: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-point 95% CI half-width for corrected PM2.5.
+
+    Combines two independent error sources in quadrature:
+      • sensor uncertainty  — the dual-channel coefficient of variation applied
+        proportionally to concentration (relative standard uncertainty);
+      • correction uncertainty — the Barkjohn (2021) RMSE (absolute).
+    When only one PM channel exists, the band reflects the correction RMSE alone
+    and is labelled accordingly (honest, not hidden)."""
+    pm = pd.to_numeric(pm_series, errors="coerce")
+    cv = channel_agreement.get("cv_between_channels") if channel_agreement else None
+    if cv is not None and cv == cv:  # not NaN
+        cv_frac = float(cv) / 100.0
+        method = "Dual-channel CV ⊕ Barkjohn RMSE (quadrature, 95%)"
+        single = False
+    else:
+        cv_frac = 0.0
+        method = "Barkjohn correction RMSE only (95%)"
+        single = True
+    u_total = np.sqrt((cv_frac * pm.clip(lower=0)) ** 2 + BARKJOHN_RMSE ** 2)
+    half = 1.96 * u_total
+    ci_low = (pm - half).clip(lower=0)
+    ci_high = pm + half
+    mean_half = float(half[half.notna()].mean()) if half.notna().any() else None
+    return {
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "mean_ci_halfwidth": round(mean_half, 2) if mean_half is not None else None,
+        "method": method,
+        "single_channel": single,
+        "barkjohn_rmse": BARKJOHN_RMSE,
+        "confidence": 0.95,
+    }
+
+
+def build_trend_test(daily_series: pd.Series) -> Optional[Dict[str, Any]]:
+    """Mann-Kendall trend + Theil-Sen slope (µg/m³ per year, 95% CI) + Pettitt
+    change-point. ``daily_series`` is daily-mean corrected PM2.5 indexed by date.
+    Returns None when there are too few days (<10) for a meaningful test."""
+    from scipy import stats as _stats
+
+    s = daily_series.dropna()
+    if len(s) < 10:
+        return None
+    idx = pd.to_datetime(pd.Index(s.index))
+    t_years = np.asarray((idx - idx[0]).total_seconds()) / (365.25 * 86400.0)
+    y = s.to_numpy(dtype=float)
+    n = len(y)
+    if np.ptp(t_years) <= 0:
+        return None
+
+    # Mann-Kendall via Kendall's tau against a monotonic time axis.
+    tau, p_value = _stats.kendalltau(t_years, y)
+    # Theil-Sen slope + 95% CI (robust, non-parametric).
+    slope, intercept, lo_slope, hi_slope = _stats.theilslopes(y, t_years, 0.95)
+
+    significant = bool(p_value is not None and p_value == p_value and p_value < 0.05)
+    if significant:
+        direction = "increasing" if slope > 0 else "decreasing"
+    else:
+        direction = "no significant trend"
+
+    # Pettitt non-parametric single change-point (shift in the mean).
+    ranks = _stats.rankdata(y)
+    csum = np.cumsum(ranks)
+    t_arr = np.arange(1, n + 1)
+    U = 2.0 * csum - t_arr * (n + 1)
+    K = float(np.max(np.abs(U)))
+    cp_idx = int(np.argmax(np.abs(U)))
+    p_cp = float(min(1.0, 2.0 * np.exp(-6.0 * K * K / (n ** 3 + n ** 2))))
+    cp_date = idx[cp_idx].strftime("%Y-%m-%d") if p_cp < 0.05 else None
+
+    return {
+        "n_days": int(n),
+        "tau": round(float(tau), 3) if tau == tau else None,
+        "p_value": round(float(p_value), 4) if (p_value is not None and p_value == p_value) else None,
+        "sen_slope_per_year": round(float(slope), 3),
+        "sen_slope_ci": [round(float(lo_slope), 3), round(float(hi_slope), 3)],
+        "direction": direction,
+        "significant": significant,
+        "change_point_date": cp_date,
+        "change_point_p": round(p_cp, 4),
+        "method": "Mann-Kendall (Kendall τ) · Theil-Sen slope · Pettitt change-point",
+    }
+
+
+def build_exposure_metrics(hourly_corrected: pd.Series, sampling_hours: float = 1.0) -> Optional[Dict[str, Any]]:
+    """Translate concentrations into human-exposure burden: cumulative µg·hours,
+    days above the WHO 15 and EPA 35 guidelines, and an illustrative long-term
+    excess-mortality-risk estimate (WHO/GBD log-linear, RR≈1.08 per 10 µg/m³)."""
+    s = pd.to_numeric(hourly_corrected, errors="coerce").dropna()
+    if s.empty:
+        return None
+    mean_conc = float(s.mean())
+    ug_hours = float((s * sampling_hours).sum())
+    exposure_hours = float(len(s) * sampling_hours)
+
+    days_over_who = days_over_epa = n_days = None
+    if isinstance(s.index, pd.DatetimeIndex):
+        daily = s.resample("D").mean().dropna()
+        if not daily.empty:
+            n_days = int(len(daily))
+            days_over_who = int((daily > 15.0).sum())
+            days_over_epa = int((daily > 35.0).sum())
+
+    # WHO/GBD-style long-term relative risk, log-linear above the WHO guideline.
+    rr_per_10 = 1.08
+    excess_risk_pct = None
+    if mean_conc > 0:
+        delta = max(0.0, mean_conc - 15.0)
+        rr = rr_per_10 ** (delta / 10.0)
+        excess_risk_pct = round((rr - 1.0) * 100.0, 1)
+
+    return {
+        "mean_pm25": round(mean_conc, 2),
+        "cumulative_ug_hours": round(ug_hours, 1),
+        "exposure_hours": round(exposure_hours, 1),
+        "n_days": n_days,
+        "days_over_who15": days_over_who,
+        "days_over_epa35": days_over_epa,
+        "excess_mortality_risk_pct": excess_risk_pct,
+        "rr_per_10ug": rr_per_10,
+        "note": ("Excess-risk is an illustrative long-term estimate (RR≈1.08 per 10 µg/m³, "
+                 "WHO/GBD log-linear) relative to the WHO 15 µg/m³ guideline — not a clinical "
+                 "prediction."),
+    }
+
+
+def compute_did(control_series: pd.Series, treatment_series: pd.Series,
+                split_date: Optional[pd.Timestamp] = None) -> Optional[Dict[str, Any]]:
+    """Difference-in-differences excess for a treated house vs a control.
+
+    Aligns the two hourly series on their common timestamps. With a ``split_date``
+    it fits OLS ``pm ~ treated + post + treated:post`` and returns the interaction
+    term (the DiD estimate) with its 95% CI and p-value. Without a split it reports
+    the treated-minus-control mean difference as a % excess with a paired-t CI."""
+    c = pd.to_numeric(control_series, errors="coerce").dropna()
+    t = pd.to_numeric(treatment_series, errors="coerce").dropna()
+    if c.empty or t.empty:
+        return None
+    joined = pd.concat([c.rename("control"), t.rename("treat")], axis=1, join="inner").dropna()
+    if len(joined) < 8:
+        return None
+
+    control_mean = float(joined["control"].mean())
+    treat_mean = float(joined["treat"].mean())
+    if control_mean <= 0:
+        return None
+
+    try:
+        from scipy import stats as _stats
+        if split_date is not None and isinstance(joined.index, pd.DatetimeIndex):
+            import statsmodels.api as sm  # optional, richer estimate
+            long = pd.concat([
+                pd.DataFrame({"pm": joined["control"], "treated": 0}),
+                pd.DataFrame({"pm": joined["treat"], "treated": 1}),
+            ])
+            long["post"] = (long.index >= split_date).astype(int)
+            long["did"] = long["treated"] * long["post"]
+            X = sm.add_constant(long[["treated", "post", "did"]])
+            model = sm.OLS(long["pm"], X).fit()
+            coef = float(model.params["did"])
+            ci = model.conf_int().loc["did"].tolist()
+            pval = float(model.pvalues["did"])
+            excess_pct = round(coef / control_mean * 100.0, 1)
+            ci_pct = [round(ci[0] / control_mean * 100.0, 1), round(ci[1] / control_mean * 100.0, 1)]
+            method = "Difference-in-differences (OLS interaction term)"
+        else:
+            diff = joined["treat"] - joined["control"]
+            mean_diff = float(diff.mean())
+            sem = float(diff.sem())
+            tcrit = float(_stats.t.ppf(0.975, len(diff) - 1))
+            lo, hi = mean_diff - tcrit * sem, mean_diff + tcrit * sem
+            tstat, pval = _stats.ttest_rel(joined["treat"], joined["control"])
+            pval = float(pval)
+            excess_pct = round(mean_diff / control_mean * 100.0, 1)
+            ci_pct = [round(lo / control_mean * 100.0, 1), round(hi / control_mean * 100.0, 1)]
+            method = "Paired difference (treated − control), 95% CI"
+    except Exception:
+        return None
+
+    return {
+        "excess_pct": excess_pct,
+        "excess_ci_pct": ci_pct,
+        "p_value": round(pval, 4) if pval == pval else None,
+        "significant": bool(pval == pval and pval < 0.05),
+        "control_mean": round(control_mean, 2),
+        "treat_mean": round(treat_mean, 2),
+        "n_paired": int(len(joined)),
+        "method": method,
+    }
+
+
+def _series_from_rolling_median(rm: Optional[Dict[str, Any]]) -> Optional[pd.Series]:
+    """Reconstruct an hourly PM2.5 level series from a stored ``rolling_median``
+    chart dict (prefers the 24-hour median level, falls back to the base series).
+    Returns a datetime-indexed Series, or None if unusable."""
+    if not isinstance(rm, dict):
+        return None
+    ts = rm.get("timestamps") or []
+    vals = rm.get("median_24h")
+    if not vals or all(v is None for v in vals) or len(vals) != len(ts):
+        vals = rm.get("pm25")
+    if not ts or not vals or len(ts) != len(vals):
+        return None
+    idx = pd.to_datetime(pd.Series(ts), errors="coerce")
+    s = pd.Series(vals, index=idx)
+    s = s[~s.index.isna()]
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    return s if not s.empty else None
+
+
+def attach_did_to_analyses(analyses: List[Dict[str, Any]]) -> None:
+    """Compute difference-in-differences (each treatment house vs the control)
+    in place. ``analyses`` is control-first; each dict must carry a
+    ``rolling_median`` chart dict. Adds a ``did`` key to every treatment house."""
+    if not analyses:
+        return
+    ctrl = _series_from_rolling_median(analyses[0].get("rolling_median"))
+    if ctrl is None:
+        return
+    for a in analyses[1:]:
+        treat = _series_from_rolling_median(a.get("rolling_median"))
+        a["did"] = compute_did(ctrl, treat) if treat is not None else None
 
 
 def analyze_dataset(
@@ -4815,6 +5208,33 @@ def analyze_dataset(
         aqi_current=_aqi_current,
     )
 
+    # ── Scientific-rigor add-ons (Tier 1–3) ──────────────────────────────────
+    # Reproducibility provenance (hash of raw bytes + frozen method versions).
+    _repro = compute_repro_hash(file_path, extra={"window": [str(window[0]), str(window[1])] if window else None,
+                                                   "label": label})
+    # Statistical trend test on daily-mean corrected PM2.5.
+    _trend_daily = (daily["pm25_corrected"].fillna(daily["pm25"]) if "pm25_corrected" in daily.columns
+                    else (daily["pm25"] if "pm25" in daily.columns else pd.Series(dtype=float)))
+    _trend_test = build_trend_test(_trend_daily)
+    # Exposure & health-burden metrics from hourly corrected concentrations.
+    _exposure = build_exposure_metrics(_hourly_corrected)
+    # Per-point measurement-uncertainty band on corrected PM2.5.
+    _pm_for_ci = (cleaned["pm25_corrected"].fillna(cleaned["pm25"]) if "pm25_corrected" in cleaned
+                  else cleaned["pm25"] if "pm25" in cleaned else pd.Series(dtype=float))
+    _uncertainty = build_uncertainty(_pm_for_ci, channel_agreement)
+    _ci_ts = _ts_str(cleaned.index) if not cleaned.empty else []
+    _ci_low_list = _uncertainty["ci_low"].round(2).where(lambda s: s.notna(), None).tolist() if not cleaned.empty else []
+    _ci_high_list = _uncertainty["ci_high"].round(2).where(lambda s: s.notna(), None).tolist() if not cleaned.empty else []
+    _, _ci_low_d = decimate_data(list(_ci_ts), list(_ci_low_list))
+    _, _ci_high_d = decimate_data(list(_ci_ts), list(_ci_high_list))
+    _uncertainty_summary = {
+        "mean_ci_halfwidth": _uncertainty["mean_ci_halfwidth"],
+        "method": _uncertainty["method"],
+        "single_channel": _uncertainty["single_channel"],
+        "barkjohn_rmse": _uncertainty["barkjohn_rmse"],
+        "confidence": _uncertainty["confidence"],
+    }
+
     result = {
         "summary": {
             "aqi_current": _aqi_current,
@@ -4853,6 +5273,17 @@ def analyze_dataset(
             "pm25_max": round(_pm25_max, 2),
             "narrative_summary": _narrative,
             "tz_label": _tz_label,
+            "trend_test": _trend_test,
+            "exposure": _exposure,
+            "uncertainty": _uncertainty_summary,
+            "repro": _repro,
+            # Representative sensor coordinates (used only by opt-in network
+            # features; never sent anywhere unless the user explicitly runs them).
+            # Range-guarded so a mis-detected column never yields bogus coordinates.
+            "latitude": (round(float(lat_value), 5) if (lat_value is not None and pd.notna(lat_value)
+                         and -90.0 <= float(lat_value) <= 90.0) else None),
+            "longitude": (round(float(lon_value), 5) if (lon_value is not None and pd.notna(lon_value)
+                          and -180.0 <= float(lon_value) <= 180.0) else None),
             "humidity_used": bool("humidity" in cleaned and cleaned["humidity"].between(*HUMID_RANGE).any()),
             "mean_rh": (round(float(cleaned.loc[cleaned["humidity"].between(*HUMID_RANGE), "humidity"].mean()), 1) if ("humidity" in cleaned and cleaned["humidity"].between(*HUMID_RANGE).any()) else None),
             "rh_min": (round(float(cleaned.loc[cleaned["humidity"].between(*HUMID_RANGE), "humidity"].min()), 1) if ("humidity" in cleaned and cleaned["humidity"].between(*HUMID_RANGE).any()) else None),
@@ -4877,6 +5308,11 @@ def analyze_dataset(
                 "timestamps": decimate_data(_ts_str(cleaned.index), cleaned["pm25"].round(2).where(lambda s: s.notna(), None).tolist())[0],
                 "pm25": decimate_data(_ts_str(cleaned.index), cleaned["pm25"].round(2).where(lambda s: s.notna(), None).tolist())[1],
                 "pm25_corrected": decimate_data(_ts_str(cleaned.index), cleaned["pm25_corrected"].round(2).where(lambda s: s.notna(), None).tolist())[1],
+                # 95% measurement-uncertainty band on the corrected series (Tier 1).
+                "ci_low": _ci_low_d,
+                "ci_high": _ci_high_d,
+                "ci_method": _uncertainty["method"],
+                "ci_single_channel": _uncertainty["single_channel"],
                 "who_line": 15,
                 "epa_line": 35,
                 "gap_enforcement": "2T (2-minute refrequencing for physical gap visualization)",
@@ -5125,6 +5561,25 @@ def _write_outputs(
 
     hourly.reset_index().to_csv(output_dir / "hourly_summary.csv", index=False)
     outputs["hourly_summary"] = "hourly_summary.csv"
+
+    # UTC-indexed hourly corrected PM2.5 — a clean, timezone-unambiguous series
+    # for the opt-in network features (reference-monitor validation, pollution
+    # rose) so their joins with external UTC data are always correct.
+    try:
+        _hu = hourly.copy()
+        if getattr(_hu.index, "tz", None) is not None:
+            _hu.index = _hu.index.tz_convert("UTC")
+        _pmc = (_hu["pm25_corrected"].fillna(_hu["pm25"]) if "pm25_corrected" in _hu.columns
+                else (_hu["pm25"] if "pm25" in _hu.columns else None))
+        if _pmc is not None:
+            _utc_df = pd.DataFrame({
+                "utc_hour": _hu.index.strftime("%Y-%m-%dT%H:00"),
+                "pm25_corrected": _pmc.round(2).values,
+            }).dropna()
+            _utc_df.to_csv(output_dir / "sensor_hourly_utc.csv", index=False)
+            outputs["sensor_hourly_utc"] = "sensor_hourly_utc.csv"
+    except Exception:
+        pass
 
     daily.reset_index().to_csv(output_dir / "daily_aqi.csv", index=False)
     outputs["daily_aqi"] = "daily_aqi.csv"
