@@ -9,6 +9,13 @@ dist/
 build/
 .eggs/
 
+# Tool / build caches (regenerable — see clean.sh)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.matplotlib/
+
 # Virtual environments
 venv/
 .venv/
