@@ -39,10 +39,41 @@ def _make_csv(days: int = 5, freq_min: int = 10) -> bytes:
     return df.to_csv(index=False).encode()
 
 
-def _analyze(csv: bytes) -> dict:
-    r = client.post("/api/analyze", files={"file": ("data.csv", csv, "text/csv")})
+def _analyze(csv: bytes, timezone: str | None = None) -> dict:
+    data = {"timezone": timezone} if timezone else {}
+    r = client.post("/api/analyze", data=data,
+                    files={"file": ("data.csv", csv, "text/csv")})
     assert r.status_code == 200, r.text
     return r.json()
+
+
+def test_timezone_as_recorded_keeps_wall_clock():
+    """AS_RECORDED must not shift timestamps: the analysis window starts at the
+    file's own first wall-clock time (2025-01-01 00:00)."""
+    s = _analyze(_make_csv(), timezone="AS_RECORDED")["result"]["summary"]
+    assert s["tz_label"] == "As recorded"
+    assert s["date_range"]["start"].startswith("2025-01-01T00:00")
+
+
+def test_timezone_as_recorded_with_zone_name():
+    """A user-named zone (e.g. EDT) is carried as a display label — timestamps
+    still unshifted."""
+    r = client.post(
+        "/api/analyze",
+        data={"timezone": "AS_RECORDED", "timezone_label": "EDT"},
+        files={"file": ("data.csv", _make_csv(), "text/csv")},
+    )
+    assert r.status_code == 200, r.text
+    s = r.json()["result"]["summary"]
+    assert s["tz_label"] == "EDT (as recorded)"
+    assert s["date_range"]["start"].startswith("2025-01-01T00:00")
+
+
+def test_timezone_conversion_shifts_wall_clock():
+    """Selecting a real timezone converts UTC -> local (New York is UTC-5 in Jan)."""
+    s = _analyze(_make_csv(), timezone="America/New_York")["result"]["summary"]
+    assert s["tz_label"] == "America/New_York"
+    assert s["date_range"]["start"].startswith("2024-12-31T19:00")
 
 
 def test_analyze_returns_core_numbers():

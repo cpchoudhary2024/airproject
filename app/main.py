@@ -280,8 +280,17 @@ async def analyze(
     device_id: str = Form(""),
     location: str = Form(""),
     timezone: str = Form("UTC"),
+    timezone_label: str = Form(""),
 ) -> dict:
-    metadata = {"device_id": device_id.strip(), "location": location.strip(), "timezone": timezone.strip()}
+    metadata = {
+        "device_id": device_id.strip(),
+        "location": location.strip(),
+        "timezone": timezone.strip(),
+        # Display-only zone name used with "No conversion" (AS_RECORDED), e.g.
+        # "EDT" — lets reports state the file's true local timezone without
+        # shifting any timestamps.
+        "timezone_label": timezone_label.strip(),
+    }
     file_id, job_dir, result, outputs = await _run_analysis_job(file, metadata=metadata)
 
     # Store metadata in summary.json for comparison report use
@@ -520,8 +529,8 @@ def export_to_word(file_id: str) -> FileResponse:
         
         doc.add_heading('Quality Scoring', level=2)
         doc.add_paragraph(
-            'Quality Score Formula: Q = (0.7 × Validity Score) + (0.3 × Coverage Score)\n'
-            'This formula prioritizes data integrity (70% weight) while accounting for temporal gaps and completeness (30% weight).',
+            'Quality Score Formula: Q = (0.4 × Validity Score) + (0.6 × Coverage Score)\n'
+            'This formula weights temporal completeness (60%) alongside reading validity (40%), so both silent gaps and invalid readings reduce the score.',
             style='List Bullet'
         )
         

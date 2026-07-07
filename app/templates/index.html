@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
     <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260703f" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260707a" />
   </head>
   <body>
     <div class="app">
@@ -41,7 +41,8 @@
               <div class="input-group-inline" style="flex:1;">
                 <label for="timezone-select">Report Timezone</label>
                 <select id="timezone-select" class="text-input">
-                  <option value="UTC">UTC — Coordinated Universal Time</option>
+                  <option value="AS_RECORDED">No conversion — timestamps already in local time (use as recorded)</option>
+                  <option value="UTC" selected>UTC — Coordinated Universal Time (PurpleAir default export)</option>
                   <optgroup label="North America">
                     <option value="America/New_York">America/New_York (ET)</option>
                     <option value="America/Chicago">America/Chicago (CT)</option>
@@ -114,7 +115,14 @@
                 </select>
               </div>
             </div>
-            <p class="meta" style="margin-top:4px;">All analysis, charts, and PDF report will use this timezone for daily grouping and timestamps.</p>
+            <div class="device-info-row hidden" id="tz-asrecorded-wrap" style="margin-top:10px;">
+              <div class="input-group-inline" style="flex:1;">
+                <label for="tz-asrecorded-label">Timezone name for reports — optional</label>
+                <input type="text" id="tz-asrecorded-label" class="text-input"
+                       placeholder="e.g. EDT — Eastern Daylight Time" maxlength="40" />
+              </div>
+            </div>
+            <p class="meta" style="margin-top:4px;">PurpleAir exports timestamps in <strong>UTC</strong> by default — pick your local timezone to convert. If you exported the file with timestamps <strong>already in your local time</strong>, choose <strong>No conversion</strong> so times are used exactly as recorded (selecting a timezone would shift them twice) — you can then name the timezone above so charts and reports state it correctly.</p>
           </div>
 
           <span class="import-group-label" style="margin-top:18px;">Upload data</span>
@@ -576,7 +584,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260703f"></script>
+    <script src="/static/app.js?v=20260707a"></script>
 
     <footer class="site-footer">
       <div class="footer-inner">

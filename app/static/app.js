@@ -40,8 +40,18 @@ let _pendingControl = false;  // true while the next picked file should become t
 let currentTzLabel = 'UTC';
 function _tzIsUtc() { return !currentTzLabel || currentTzLabel === 'UTC'; }
 // Short, human-friendly zone name for axis titles, e.g. 'New York', 'Kolkata'.
+// 'As recorded' (no conversion) renders as the user-named zone if given
+// ('EDT (as recorded)' -> 'EDT'), else plain 'local', so axes read
+// naturally: "Date/Time (EDT local time)" / "Date/Time (local time)".
+function _tzIsAsRecorded() {
+  return !!currentTzLabel && currentTzLabel.toLowerCase().includes('as recorded');
+}
 function _tzShort() {
   if (_tzIsUtc()) return 'UTC';
+  if (_tzIsAsRecorded()) {
+    const zone = currentTzLabel.replace(/\s*\(as recorded\)\s*/i, '').trim();
+    return zone && zone.toLowerCase() !== 'as recorded' ? zone : 'local';
+  }
   return currentTzLabel.split('/').pop().replace(/_/g, ' ');
 }
 // "Date/Time (UTC)" vs "Date/Time (New York local time)"
@@ -188,8 +198,12 @@ function buildOverviewCards(summary) {
     },
     {
       title: 'Timezone',
-      value: summary.tz_label && summary.tz_label !== 'UTC' ? summary.tz_label.split('/').pop().replace('_', ' ') : 'UTC',
-      note: summary.tz_label || 'UTC — all timestamps in Coordinated Universal Time',
+      value: (summary.tz_label || '').toLowerCase().includes('as recorded')
+        ? (summary.tz_label.replace(/\s*\(as recorded\)\s*/i, '').trim() || 'As recorded')
+        : summary.tz_label && summary.tz_label !== 'UTC' ? summary.tz_label.split('/').pop().replace('_', ' ') : 'UTC',
+      note: (summary.tz_label || '').toLowerCase().includes('as recorded')
+        ? 'Timestamps used exactly as recorded in the file (no conversion)'
+        : summary.tz_label || 'UTC — all timestamps in Coordinated Universal Time',
       color: summary.tz_label && summary.tz_label !== 'UTC' ? '#1f7a8c' : '#6d6256',
     },
   ];
@@ -1327,6 +1341,12 @@ async function handleSingleFile(file) {
   }
   const tzSelect = document.getElementById('timezone-select');
   formData.append('timezone', tzSelect ? tzSelect.value : 'UTC');
+  // With "No conversion", the user may name the file's actual timezone (e.g.
+  // EDT) so charts and reports state it instead of a generic label.
+  const tzNameInput = document.getElementById('tz-asrecorded-label');
+  if (tzSelect && tzSelect.value === 'AS_RECORDED' && tzNameInput && tzNameInput.value.trim()) {
+    formData.append('timezone_label', tzNameInput.value.trim());
+  }
 
   try {
     const response = await fetch('/api/analyze', { method: 'POST', body: formData });
@@ -1562,6 +1582,17 @@ function setupDropzone() {
     }
     handleSingleFile(files?.[0]);
   });
+}
+
+// Show the optional "timezone name" field only when "No conversion" is chosen.
+const _tzSelectEl = document.getElementById('timezone-select');
+const _tzNameWrap = document.getElementById('tz-asrecorded-wrap');
+if (_tzSelectEl && _tzNameWrap) {
+  const _syncTzNameField = () => {
+    _tzNameWrap.classList.toggle('hidden', _tzSelectEl.value !== 'AS_RECORDED');
+  };
+  _tzSelectEl.addEventListener('change', _syncTzNameField);
+  _syncTzNameField();
 }
 
 function _controlIndex() {
