@@ -306,7 +306,7 @@ def build_narrative_summary(
         # ── 2. Air quality results ────────────────────────────────────────────
         # AQI health guidance mapping
         _aqi_guidance = {
-            "Good":              "posing no significant health risk — outdoor activities are safe for everyone.",
+            "Good":              "satisfactory air quality — air pollution poses little or no risk (EPA AQI category definition).",
             "Moderate":          "acceptable for most people, though unusually sensitive individuals may notice minor effects.",
             "USG":               "unhealthy for sensitive groups (children, elderly, people with asthma or heart disease); "
                                  "the general public is less likely to be affected.",
@@ -319,19 +319,27 @@ def build_narrative_summary(
         }
         health_msg = _aqi_guidance.get(aqi_cat, "of uncertain category — check AQI thresholds.")
 
+        # Note: WHO 15 / EPA 35 formally apply to 24-hour (daily) means; the
+        # period mean is compared to those levels as context, and the wording
+        # says so explicitly to avoid a category error.
         who_comparison = ""
         if pm_val is not None:
             if pm_val <= 15:
-                who_comparison = f"This average is within the WHO 24-hour guideline of 15 µg/m³."
+                who_comparison = (
+                    f"The period mean is below the WHO 24-hour guideline level of 15 µg/m³ "
+                    f"(the guideline formally applies to daily means; see the exceedance counts below)."
+                )
             elif pm_val <= 35:
                 who_comparison = (
-                    f"This exceeds the WHO guideline (15 µg/m³) but is within the EPA 24-hour standard (35 µg/m³). "
-                    f"Chronic exposure at this level carries a moderate long-term health risk."
+                    f"The period mean is above the WHO 24-hour guideline level (15 µg/m³) but below the "
+                    f"EPA 24-hour standard level (35 µg/m³). Sustained exposure in this range is associated "
+                    f"with increased respiratory and cardiovascular risk in epidemiological studies (WHO, 2021)."
                 )
             else:
                 who_comparison = (
-                    f"This exceeds both the WHO guideline (15 µg/m³) and the EPA 24-hour standard (35 µg/m³), "
-                    f"indicating persistently poor air quality with potential health consequences for all residents."
+                    f"The period mean is above both the WHO 24-hour guideline level (15 µg/m³) and the "
+                    f"EPA 24-hour standard level (35 µg/m³) — persistently elevated fine-particle "
+                    f"pollution associated with increased health risk across the exposed population."
                 )
 
         parts.append(
@@ -345,13 +353,13 @@ def build_narrative_summary(
             peak_note = f" The single highest recorded PM2.5 was {pm25_max:.1f} µg/m³."
         exceed_parts = []
         if who_15_hours > 0:
-            exceed_parts.append(f"{who_15_hours} hours exceeded the WHO 24-h guideline of 15 µg/m³")
+            exceed_parts.append(f"hourly PM2.5 was above the WHO 24-hour guideline level (15 µg/m³) for {who_15_hours} hours")
         if epa_35_hours > 0:
-            exceed_parts.append(f"{epa_35_hours} hours exceeded the EPA standard of 35 µg/m³")
+            exceed_parts.append(f"above the EPA 24-hour standard level (35 µg/m³) for {epa_35_hours} hours")
         if exceed_parts:
             exceedance_note = "During the monitoring period, " + " and ".join(exceed_parts) + "."
         elif who_15_hours == 0 and epa_35_hours == 0:
-            exceedance_note = "PM2.5 remained below the EPA 35 µg/m³ standard throughout the entire monitoring period."
+            exceedance_note = "Hourly PM2.5 never rose above the WHO 24-hour guideline level of 15 µg/m³ during the monitoring period."
         else:
             exceedance_note = ""
         parts.append(f"\nPOLLUTION EVENTS:{peak_note} {exceedance_note}")
@@ -392,9 +400,9 @@ def build_narrative_summary(
 
         # ── 6. Data quality ───────────────────────────────────────────────────
         if quality_score >= 90:
-            q_label = "excellent — suitable for peer-reviewed publication and regulatory submission"
+            q_label = "excellent — appropriate to support research publications and regulatory submissions"
         elif quality_score >= 80:
-            q_label = "good — suitable for most research and community reporting purposes"
+            q_label = "good — appropriate for most research and community reporting purposes"
         elif quality_score >= 70:
             q_label = "acceptable — note data gaps or quality flags in any formal publication"
         else:
@@ -3212,33 +3220,62 @@ def build_public_report_pdf(
     # This is an executive summary (the "so what"), deliberately NOT a restatement
     # of the numeric Health Guidelines box below it. It translates the measured
     # levels into a clear takeaway and activity guidance for residents.
-    if pm_f <= 15 and who_h == 0:
+    # The verdict is graded on DAILY averages against the WHO 24-hour guideline
+    # (the guideline's own averaging period) — never on the period mean, which
+    # would understate short episodes. Health guidance describes documented
+    # risk groups; it never asserts what "most people" experienced.
+    _days_over = _total_days - _within_who_days
+    # Worst dates for the verdict must come from DAILY means (the same basis as
+    # the day counts) — not from the hour-based list used elsewhere, which can
+    # name more dates than there are exceedance days.
+    _over_daily = _dp[_dp["_pm_val"] > 15].nlargest(2, "_pm_val")
+    _daily_dates_str = " and ".join(_short_date(d) for d in _over_daily["_d"].tolist())
+    _worst_note = f" (highest on {_daily_dates_str})" if _daily_dates_str else ""
+    if _days_over == 0 and who_h == 0:
         _glance_verdict = "Air quality at this location was GOOD throughout the monitoring period."
         _glance_interp = (
-            "Fine-particle pollution (PM2.5) stayed within the World Health Organization's "
-            "health-protective 24-hour guideline at all times. Outdoor activity was suitable "
-            "for everyone, including children, older adults, and people with heart or lung conditions."
+            f"Fine-particle pollution (PM2.5) stayed within the World Health Organization's "
+            f"24-hour guideline of 15 µg/m³ on every day measured, and no individual hour "
+            f"exceeded it (period average: {pm_f:.1f} µg/m³). Air quality at this level is "
+            f"considered suitable for outdoor activity for everyone, including children, "
+            f"older adults, and people with heart or lung conditions."
         )
-    elif pm_f <= 15:
-        _glance_verdict = "Air quality at this location was GENERALLY GOOD, with occasional short-lived peaks."
+    elif _days_over == 0:
+        _glance_verdict = "Air quality at this location was GOOD, with brief short-term peaks."
         _glance_interp = (
-            f"Average PM2.5 stayed within the WHO 24-hour guideline, though it rose above it for "
-            f"about {_who_pct}% of hours. Most people were unaffected; sensitive groups may wish to "
-            "limit prolonged outdoor exertion during the brief higher-pollution periods."
+            f"Every daily average met the WHO 24-hour guideline of 15 µg/m³ (period average: "
+            f"{pm_f:.1f} µg/m³), although PM2.5 rose above that level during about {_who_pct}% "
+            f"of individual hours. Brief peaks of this kind commonly reflect nearby, short-lived "
+            f"sources such as traffic, cooking, or smoke. During visibly smoky or dusty periods, "
+            f"people with asthma or heart disease benefit from limiting prolonged outdoor exertion."
+        )
+    elif _within_who_days_pct >= 80:
+        _glance_verdict = "Air quality was GENERALLY GOOD — most days met the WHO guideline."
+        _glance_interp = (
+            f"{_within_who_days} of {_total_days} days ({_within_who_days_pct}%) met the WHO "
+            f"24-hour guideline of 15 µg/m³; {_days_over} day{'s' if _days_over != 1 else ''} "
+            f"exceeded it{_worst_note}. On days above the guideline, children, older adults, "
+            f"and people with heart or lung conditions benefit from limiting prolonged outdoor "
+            f"exertion; for everyone else the added risk on those days is small but not zero."
         )
     elif pm_f <= 35:
-        _glance_verdict = "Air quality at this location was MODERATE."
+        _glance_verdict = "Air quality at this location was MODERATE during this period."
         _glance_interp = (
-            "Average PM2.5 was above the stricter WHO guideline but within the U.S. EPA 24-hour "
-            "standard. People with respiratory or heart conditions should watch conditions and "
-            "limit prolonged outdoor exertion on higher-pollution days."
+            f"{_days_over} of {_total_days} days exceeded the WHO 24-hour guideline of 15 µg/m³"
+            f"{_worst_note}, and the period average was {pm_f:.1f} µg/m³ — above the WHO guideline "
+            f"but within the U.S. EPA 24-hour standard of 35 µg/m³. Long-term exposure at these "
+            f"levels is associated with increased respiratory and cardiovascular risk in "
+            f"epidemiological studies; limiting prolonged outdoor exertion on the higher-pollution "
+            f"days is a reasonable precaution, particularly for sensitive groups."
         )
     else:
-        _glance_verdict = "Air quality at this location was a CONCERN during this period."
+        _glance_verdict = "Air quality at this location was ELEVATED — a health concern this period."
         _glance_interp = (
-            "Average PM2.5 exceeded the U.S. EPA 24-hour standard. Reducing outdoor exposure on "
-            "high-pollution days is advisable, especially for children, older adults, and people "
-            "with heart or lung conditions."
+            f"The period average of {pm_f:.1f} µg/m³ was above the level of the U.S. EPA 24-hour "
+            f"standard (35 µg/m³), and {_days_over} of {_total_days} days were above the WHO guideline"
+            f"{_worst_note}. Reducing outdoor exposure on high-pollution days — and using indoor "
+            f"filtration where available — is advisable, especially for children, older adults, "
+            f"pregnant women, and people with heart or lung conditions."
         )
 
     _gv_lines = textwrap.wrap(_glance_verdict, width=78)
@@ -3273,10 +3310,12 @@ def build_public_report_pdf(
     pdf.line(LM + 10, y[0] - 26, LM + UW - 10, y[0] - 26)
 
     # Contextual detail lines — each must fit ~97 chars at 8pt; dates formatted as "May 18"
+    # The peak is a single reading; the EPA 35 ug/m3 value is a 24-hour (daily)
+    # standard, so it is cited as reference scale — not as a pass/fail limit.
     if _pm25_max_val < 35:
-        _max_ctx = f"Peak: {_pm25_max_val:.1f} ug/m3 (below the EPA 24-hour limit of 35 ug/m3)."
+        _max_ctx = f"Peak single reading: {_pm25_max_val:.1f} ug/m3 (for scale: EPA daily standard is 35 ug/m3)."
     else:
-        _max_ctx = f"Peak: {_pm25_max_val:.1f} ug/m3 (exceeded the EPA 24-hour limit of 35 ug/m3)."
+        _max_ctx = f"Peak single reading: {_pm25_max_val:.1f} ug/m3 (above the EPA daily-standard level of 35 ug/m3)."
 
     if who_h == 0:
         _who_det = "No individual hours exceeded the WHO limit during the entire monitoring period."
@@ -3290,13 +3329,13 @@ def build_public_report_pdf(
          (f"Below the WHO guideline. {_max_ctx}" if pm_f <= 15
           else f"Above the WHO 24-hour guideline of 15 ug/m3. {_max_ctx}")),
         (who_h == 0,
-         f"Hours above WHO guideline (15 ug/m3): {who_h}",
+         f"Hours above WHO guideline level (15 ug/m3): {who_h}",
          _who_det),
         (epa_h == 0,
-         f"Hours above EPA standard (35 ug/m3): {epa_h}",
-         ("No hours reached the EPA 24-hour threshold during the entire monitoring period."
+         f"Hours above EPA standard level (35 ug/m3): {epa_h}",
+         ("No hours reached the EPA 24-hour standard level during the entire monitoring period."
           if epa_h == 0
-          else f"{epa_h} hours exceeded the EPA 24-hour standard of 35 ug/m3.")),
+          else f"Hourly PM2.5 was above the EPA 24-hour standard level (35 ug/m3) for {epa_h} hours.")),
     ]
     ry = y[0] - 42
     for good, bold_t, detail_t in std_rows:
@@ -5326,7 +5365,7 @@ def analyze_dataset(
                 f"Score primarily impacted by a contiguous {max_gap_days}-day network/power outage; "
                 f"internal data integrity remains {round(float(validity_score), 1)}% valid."
                 if coverage_score < 90 and max_gap_days > 0
-                else f"Excellent data quality — {round(float(coverage_score), 1)}% temporal coverage with {round(float(validity_score), 1)}% valid readings. Suitable for peer-reviewed publication and regulatory submission."
+                else f"Excellent data quality — {round(float(coverage_score), 1)}% temporal coverage with {round(float(validity_score), 1)}% valid readings. Appropriate to support research publications and regulatory submissions."
                 if quality_score >= 90
                 else f"Acceptable data quality (score {round(float(quality_score), 1)}/100). "
                      f"Coverage: {round(float(coverage_score), 1)}%, Validity: {round(float(validity_score), 1)}%."
