@@ -4,7 +4,6 @@ const loading = document.getElementById('loading');
 const dashboard = document.getElementById('dashboard');
 
 const overviewCards = document.getElementById('overview-cards');
-const detectedColumns = document.getElementById('detected-columns');
 const downloadButtonsPublic = document.getElementById('download-buttons-public');
 const downloadButtonsResearch = document.getElementById('download-buttons-research');
 const chartDownloads = document.getElementById('chart-downloads');
@@ -71,7 +70,7 @@ let currentFileId = null;
 // Verify required DOM elements
 const requiredElements = {
   dropzone, fileInput, loading, dashboard,
-  overviewCards, detectedColumns, downloadButtonsPublic, downloadButtonsResearch, chartDownloads, anomalyList,
+  overviewCards, downloadButtonsPublic, downloadButtonsResearch, chartDownloads, anomalyList,
   comparisonSection, comparisonResults, comparisonMeta, comparisonTable,
   compareRunButton, compareSelection
 };
@@ -274,27 +273,6 @@ function buildDataCompleteness(dc) {
 function escapeHtmlSafe(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-function buildDetectedColumns(detected) {
-  if (!detectedColumns) {
-    console.error('Detected columns container not found');
-    return;
-  }
-  
-  detectedColumns.innerHTML = '';
-  Object.entries(detected).forEach(([key, value]) => {
-    const card = document.createElement('div');
-    card.className = 'detected-card';
-    const primary = value.primary ? `${value.primary.name} (${value.primary.confidence})` : 'Not found';
-    const dual = value.dual ? 'Dual channels detected' : 'Single channel';
-    card.innerHTML = `
-      <h3>${key.toUpperCase()}</h3>
-      <p><strong>Primary:</strong> ${primary}</p>
-      <p><strong>Status:</strong> ${dual}</p>
-    `;
-    detectedColumns.appendChild(card);
-  });
 }
 
 function buildTables(tables) {
@@ -1368,7 +1346,6 @@ async function handleSingleFile(file) {
     currentTzLabel = (result.summary && result.summary.tz_label) || 'UTC';
     buildOverviewCards(result.summary);
     buildDataCompleteness(result.data_completeness);
-    buildDetectedColumns(result.detected);
     renderCharts(result.charts);
     populateChartDescriptions(result.chart_descriptions, result.summary.date_range);
     buildChartDownloads();
@@ -1908,7 +1885,6 @@ function setupTimeframeSelector(fileId, summary) {
       currentTzLabel = (result.summary && result.summary.tz_label) || 'UTC';
       buildOverviewCards(result.summary);
       buildDataCompleteness(result.data_completeness);
-      buildDetectedColumns(result.detected);
       renderCharts(result.charts);
       buildChartDownloads();
       buildTables(result.tables);

@@ -414,7 +414,23 @@ def export_to_word(file_id: str) -> FileResponse:
         date_p = doc.add_paragraph()
         date_p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
         date_p.add_run(f"Analysis Period: {date_range.get('start', 'N/A')} to {date_range.get('end', 'N/A')}")
-        
+
+        # Report timezone — same statement the PDF makes, including the
+        # no-conversion ("as recorded") mode.
+        _tz_lbl = summary.get("tz_label") or "UTC"
+        if "as recorded" in _tz_lbl.lower():
+            _tz_zone = _tz_lbl.replace("(as recorded)", "").strip()
+            _tz_line = ("Timestamps used exactly as recorded in the uploaded file"
+                        + (f" ({_tz_zone} local time)" if _tz_zone and _tz_zone.lower() != "as recorded" else "")
+                        + " — no timezone conversion applied")
+        elif _tz_lbl != "UTC":
+            _tz_line = f"All times in {_tz_lbl} (converted from UTC before analysis)"
+        else:
+            _tz_line = "All times in UTC (Coordinated Universal Time)"
+        tz_p = doc.add_paragraph()
+        tz_p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        tz_p.add_run(_tz_line)
+
         doc.add_paragraph()  # Spacing
         
         # ===== 1. EXECUTIVE SUMMARY =====
@@ -613,12 +629,14 @@ def export_to_word(file_id: str) -> FileResponse:
                 avg_val = float(str(avg_pm25).split()[0])
                 if avg_val > 35:
                     doc.add_paragraph(
-                        f"⚠ Alert: Average PM2.5 ({avg_val:.1f} µg/m³) exceeds EPA 24-hour standard.",
+                        f"⚠ Alert: Period-average PM2.5 ({avg_val:.1f} µg/m³) is above the EPA 24-hour "
+                        f"standard threshold of 35 µg/m³ (the standard formally applies to daily means).",
                         style='List Bullet'
                     )
                 elif avg_val > 15:
                     doc.add_paragraph(
-                        f"⚠ Notice: Average PM2.5 ({avg_val:.1f} µg/m³) exceeds WHO guideline.",
+                        f"⚠ Notice: Period-average PM2.5 ({avg_val:.1f} µg/m³) is above the WHO 24-hour "
+                        f"guideline of 15 µg/m³ (the guideline formally applies to daily means).",
                         style='List Bullet'
                     )
             except:

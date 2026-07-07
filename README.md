@@ -19,7 +19,7 @@ tags:
 
 # 🌬️ PurpleAir Air Quality Analyzer
 
-**Turn a raw PurpleAir CSV/XLSX export into a peer-review-grade air-quality analysis in seconds.**
+**Turn a raw PurpleAir CSV/XLSX export into a research-grade air-quality analysis in seconds.**
 Upload one file and get EPA-corrected PM2.5 trends, sensor-health validation, pollution-event
 detection, and downloadable regulatory- and community-ready PDF reports — all computed in your
 session. Nothing is persisted after your session ends.

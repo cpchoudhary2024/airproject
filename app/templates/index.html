@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
     <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260707a" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260707b" />
   </head>
   <body>
     <div class="app">
@@ -17,8 +17,9 @@
           <p class="eyebrow">Air Quality Research Platform</p>
           <h1>Professional Analysis</h1>
           <p class="subtitle">
-            Analyze PurpleAir data with EPA corrections, sensor validation, and publication-ready research reports.
-            Generate institutional-grade documentation suitable for academic and regulatory use.
+            Analyze PurpleAir data with EPA corrections, sensor validation, and research-ready reports.
+            Every number is traceable to a published method, with documentation designed to support
+            academic and regulatory use.
           </p>
         </div>
         <div class="hero-card">
@@ -265,8 +266,6 @@
           <h2>Data Completeness &amp; Inputs</h2>
           <p class="section-note">What the uploaded file contains, and the impact of anything important that is missing.</p>
           <div id="data-completeness"></div>
-          <h3 style="margin-top:22px;">Detected columns</h3>
-          <div id="detected-columns" class="detected-grid"></div>
         </section>
 
         <section class="section charts">
@@ -449,6 +448,11 @@
             <p class="section-note" style="margin:0 0 12px;">Events ranked by highest recorded PM2.5 concentration, with timestamp and duration.</p>
             <div id="table-highest-events"></div>
           </div>
+
+          <div class="table-card" style="margin-top:24px;">
+            <h3>Data anomalies</h3>
+            <ul id="anomaly-list" class="anomaly-list"></ul>
+          </div>
         </section>
 
         <section class="section custom-notes-section" id="custom-notes-section">
@@ -491,7 +495,7 @@
           <div class="download-sections">
             <div class="download-section">
               <h3>Research Report</h3>
-              <p>Complete analysis with full methodology, statistical analysis, and quality assessment. Suitable for peer-reviewed publication and regulatory submission.</p>
+              <p>Complete analysis with full methodology, statistical analysis, and quality assessment. Designed to support research publications and regulatory submissions.</p>
               <div id="download-buttons-research" class="download-grid"></div>
             </div>
 
@@ -507,11 +511,6 @@
             <p>Export individual visualizations as high-resolution PNG files for presentations and publications.</p>
             <div id="chart-downloads" class="download-grid"></div>
           </div>
-        </section>
-
-        <section class="section anomalies">
-          <h2>Data anomalies</h2>
-          <ul id="anomaly-list" class="anomaly-list"></ul>
         </section>
 
         <section class="section methods-references">
@@ -584,7 +583,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260707a"></script>
+    <script src="/static/app.js?v=20260707b"></script>
 
     <footer class="site-footer">
       <div class="footer-inner">
@@ -616,7 +615,7 @@
           <p>
             This platform is developed for research and educational purposes. Data analysis outputs are intended to support environmental health research and should not replace regulatory monitoring or clinical decision-making. EPA Barkjohn correction (Barkjohn et al., 2021) applied to all PM<sub>2.5</sub> readings. Results are subject to sensor limitations and site-specific conditions.
           </p>
-          <p class="footer-copy">&copy; 2025 Johns Hopkins Bloomberg School of Public Health. All rights reserved.</p>
+          <p class="footer-copy">Developed at Johns Hopkins Bloomberg School of Public Health &middot; 2026</p>
         </div>
       </div>
     </footer>
