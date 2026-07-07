@@ -137,3 +137,48 @@ def test_security_headers_present():
     assert h.get("x-content-type-options") == "nosniff"
     assert h.get("x-frame-options") == "DENY"
     assert "content-security-policy" in h
+
+
+def test_word_export_content_matches_analysis():
+    """The .docx must state the as-recorded timezone and the quality-score
+    formula the code actually computes (0.4/0.6) — guards against the report
+    drifting from the analysis again."""
+    import io
+    from docx import Document
+
+    r = client.post(
+        "/api/analyze",
+        data={"timezone": "AS_RECORDED", "timezone_label": "EDT"},
+        files={"file": ("data.csv", _make_csv(), "text/csv")},
+    )
+    fid = r.json()["file_id"]
+    doc_resp = client.get(f"/api/download/{fid}/report_word")
+    assert doc_resp.status_code == 200
+    text = "\n".join(p.text for p in Document(io.BytesIO(doc_resp.content)).paragraphs)
+    assert "EDT local time" in text and "no timezone conversion" in text
+    assert "0.4 × Validity" in text and "0.6 × Coverage" in text
+    assert "0.7" not in text.split("Quality Score Formula")[1][:120]
+
+
+def test_compare_flow_and_pdf():
+    """Two-file comparison returns per-house payloads and a comparison PDF."""
+    files = [("files", ("a.csv", _make_csv(), "text/csv")),
+             ("files", ("b.csv", _make_csv(days=4), "text/csv"))]
+    r = client.post("/api/analyze-multi", files=files, data={"control_index": "0"})
+    assert r.status_code == 200, r.text
+    analyses = r.json()["analyses"]
+    assert len(analyses) == 2 and analyses[0]["is_control"]
+
+    pdf = client.post("/api/compare-report", json={
+        "file_ids": [a["file_id"] for a in analyses],
+        "labels": ["Control House", "House 1"],
+    })
+    assert pdf.status_code == 200
+    assert pdf.content[:5] == b"%PDF-"
+
+
+def test_community_report_pdf_valid():
+    fid = _analyze(_make_csv())["file_id"]
+    r = client.get(f"/api/download/{fid}/public_report_pdf")
+    assert r.status_code == 200
+    assert r.content[:5] == b"%PDF-" and len(r.content) > 10_000
