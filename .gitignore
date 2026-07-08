@@ -52,6 +52,7 @@ air reports community*/
 build_reports.py
 compute_and_plot.py
 evidence.json
+build_reports_docx.py
 report_assets/
 COMPARISON_ANALYSIS_REPORT.md
 Welcome file*.md
@@ -83,3 +84,7 @@ PROFESSIONAL_ENHANCEMENTS.md
 PROJECT_SUMMARY.md
 RESTORATION_SUMMARY.md
 quickstart.sh
+
+# Generated evidence reports (binary; kept out of git — HF rejects non-LFS binaries)
+Report_*.pdf
+Report_*.docx
