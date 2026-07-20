@@ -241,7 +241,6 @@ BARKJOHN_CITATION = (
     "correction for PM2.5 data collected with the PurpleAir sensor, Atmospheric Measurement "
     "Techniques 14, 4617-4637, Eq. 10. doi:10.5194/amt-14-4617-2021"
 )
-BARKJOHN_DOI = "https://doi.org/10.5194/amt-14-4617-2021"
 
 
 def barkjohn_corrected(pm: float, rh: float) -> float:

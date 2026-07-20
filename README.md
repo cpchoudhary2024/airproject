@@ -75,20 +75,6 @@ Beyond the corrected numbers, every analysis now quantifies **how much to trust 
 - **Reproducibility ID** — a SHA-256 fingerprint of the exact input data + method versions, stamped on
   the UI and every PDF so any result is auditable and reproducible.
 
-## Location-based analysis (optional, off by default)
-
-When your export includes coordinates, two optional checks add source and regulatory context:
-
-- **Reference-monitor collocation** — pulls the nearest regulatory PM2.5 monitor (via **OpenAQ v3**)
-  and reports **bias, R², RMSE, and slope** against your sensor, with a scatter vs the 1:1 line.
-- **Pollution rose** — joins historical wind (via **Open-Meteo**, no key needed) to your PM2.5 and bins
-  by wind direction to show which direction pollution arrives from.
-
-**Privacy:** these features are **off until you click**. Only the sensor's **coordinates and date
-range** are ever sent to the external service — **your PM2.5 data never leaves your session.** To
-enable the reference-monitor lookup, set an `OPENAQ_API_KEY` environment variable (free key from
-openaq.org); the pollution rose needs no key.
-
 ## How to use
 
 1. Export your sensor data from PurpleAir as a **CSV or XLSX** (0-/2-/10-minute averages all work).
