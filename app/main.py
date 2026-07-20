@@ -222,6 +222,59 @@ def index() -> HTMLResponse:
     return FileResponse(path=str(index_path), media_type="text/html")
 
 
+# Sample dataset for the "Try with sample data" button. Generated on demand rather
+# than shipped as a file: it keeps the image small and the memory footprint flat,
+# which matters on a free Hugging Face Space. 14 days at 10-minute resolution is
+# ~2000 rows — enough to exercise every panel, small enough to analyse instantly.
+_SAMPLE_CSV_CACHE: str | None = None
+
+
+def _build_sample_csv() -> str:
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(20260301)
+    idx = pd.date_range("2026-03-01", periods=14 * 24 * 6, freq="10min", tz="UTC")
+    hours = idx.hour.to_numpy()
+    day = np.arange(len(idx)) / (24 * 6)
+
+    # Diurnal traffic peaks (~08:00 and ~19:00), a slow multi-day episode, and noise.
+    diurnal = 3.2 * np.exp(-((hours - 8) ** 2) / 6.0) + 3.8 * np.exp(-((hours - 19) ** 2) / 8.0)
+    episode = 9.0 * np.exp(-((day - 6.5) ** 2) / 1.2)      # a 2-3 day pollution event
+    cf1 = np.clip(7.0 + diurnal + episode + rng.normal(0, 1.6, len(idx)), 0.3, None)
+    rh = np.clip(58 + 20 * np.sin(2 * np.pi * (hours - 4) / 24) + rng.normal(0, 4, len(idx)), 8, 99)
+    temp = 54 + 14 * np.sin(2 * np.pi * (hours - 6) / 24) + rng.normal(0, 1.5, len(idx))
+    jitter = rng.normal(0, 0.35, len(idx))                  # small A/B disagreement
+
+    frame = pd.DataFrame({
+        "time_stamp": idx.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "humidity": rh.round(1),
+        "temperature": temp.round(1),
+        "pressure": (1009 + rng.normal(0, 2.5, len(idx))).round(2),
+        "pm2.5_cf_1": cf1.round(2),
+        "pm2.5_cf_1_a": (cf1 + jitter).clip(0).round(2),
+        "pm2.5_cf_1_b": (cf1 - jitter).clip(0).round(2),
+    })
+    return frame.to_csv(index=False)
+
+
+@app.get("/api/sample-data")
+def sample_data() -> StreamingResponse:
+    """Download a synthetic but realistic PurpleAir-style export.
+
+    Clearly labelled as sample data so it can never be mistaken for a real
+    measurement record from a real address.
+    """
+    global _SAMPLE_CSV_CACHE
+    if _SAMPLE_CSV_CACHE is None:
+        _SAMPLE_CSV_CACHE = _build_sample_csv()
+    return StreamingResponse(
+        iter([_SAMPLE_CSV_CACHE]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="SAMPLE_purpleair_demo_14days.csv"'},
+    )
+
+
 async def _run_analysis_job(file: UploadFile, *, generate_outputs: bool = True, metadata: dict | None = None) -> tuple[str, Path, dict, dict]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing file name")
@@ -443,7 +496,8 @@ def export_to_word(file_id: str) -> FileResponse:
         doc.add_paragraph(f"Period: {date_range.get('start', 'N/A')} to {date_range.get('end', 'N/A')}")
         doc.add_paragraph(f"Quality Score: {summary.get('quality_score', 'N/A')}% | Total Readings: {summary.get('total_readings', 'N/A')}")
         doc.add_paragraph(
-            f"Average PM2.5: {summary.get('pm25_average', 'N/A')} µg/m³ | "
+            f"Average PM2.5 (EPA-corrected): "
+            f"{summary.get('pm25_average_epa_corrected') or summary.get('pm25_average', 'N/A')} µg/m³ | "
             f"AQI: {summary.get('aqi_average', 'N/A')} ({summary.get('aqi_category', 'N/A')})"
         )
         
@@ -538,7 +592,7 @@ def export_to_word(file_id: str) -> FileResponse:
             'Processing pipeline:\n'
             '• Timestamps validated for monotonic progression\n'
             '• Duplicates removed\n'
-            '• EPA correction factors applied (0.534×PM + 5.604 − 0.0844×RH when RH available)\n'
+            '• EPA correction factors applied (0.524×PM + 5.75 − 0.0862×RH when RH available)\n'
             '• Detection limit correction applied (values <1 µg/m³ corrected to ~0.707 µg/m³)',
             style='List Bullet'
         )
@@ -623,20 +677,26 @@ def export_to_word(file_id: str) -> FileResponse:
             style='List Bullet'
         )
         
-        avg_pm25 = summary.get('pm25_average', 0)
+        # EPA/WHO thresholds are defined on corrected, reference-equivalent
+        # concentrations. Comparing the RAW sensor average against them (as this block
+        # previously did) systematically overstates exceedances -- raw PurpleAir
+        # readings run well above corrected values, so a clean corrected period could
+        # still trip the raw value past 35 µg/m³ and fire a false compliance alert.
+        avg_pm25 = summary.get('pm25_average_epa_corrected') or summary.get('pm25_average', 0)
         if avg_pm25:
             try:
                 avg_val = float(str(avg_pm25).split()[0])
                 if avg_val > 35:
                     doc.add_paragraph(
-                        f"⚠ Alert: Period-average PM2.5 ({avg_val:.1f} µg/m³) is above the EPA 24-hour "
-                        f"standard threshold of 35 µg/m³ (the standard formally applies to daily means).",
+                        f"⚠ Alert: Period-average EPA-corrected PM2.5 ({avg_val:.1f} µg/m³) is above the "
+                        f"EPA 24-hour standard threshold of 35 µg/m³ (the standard formally applies to "
+                        f"daily means).",
                         style='List Bullet'
                     )
                 elif avg_val > 15:
                     doc.add_paragraph(
-                        f"⚠ Notice: Period-average PM2.5 ({avg_val:.1f} µg/m³) is above the WHO 24-hour "
-                        f"guideline of 15 µg/m³ (the guideline formally applies to daily means).",
+                        f"⚠ Notice: Period-average EPA-corrected PM2.5 ({avg_val:.1f} µg/m³) is above the "
+                        f"WHO 24-hour guideline of 15 µg/m³ (the guideline formally applies to daily means).",
                         style='List Bullet'
                     )
             except:

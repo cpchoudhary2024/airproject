@@ -4,9 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PurpleAir Local Analyzer</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
+    <!-- Typography is served from the visitor's own system fonts: the Content-Security-Policy
+         blocks third-party style/font hosts, so the previous Google Fonts links never loaded,
+         and fetching them would have disclosed visitor IPs to a third party — at odds with this
+         app's promise that data never leaves the session. -->
     <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
     <link rel="stylesheet" href="/static/styles.css?v=20260707b" />
   </head>
@@ -15,11 +16,11 @@
       <header class="hero">
         <div>
           <p class="eyebrow">Air Quality Research Platform</p>
-          <h1>Professional Analysis</h1>
+          <h1>PurpleAir data, analysed and documented</h1>
           <p class="subtitle">
-            Analyze PurpleAir data with EPA corrections, sensor validation, and research-ready reports.
-            Every number is traceable to a published method, with documentation designed to support
-            academic and regulatory use.
+            Upload a sensor export and get EPA-corrected PM2.5, dual-channel validation, and
+            downloadable reports. Every number shows the method behind it — the correction applied,
+            the sensor's health, the data completeness, and the uncertainty.
           </p>
         </div>
         <div class="hero-card">
@@ -134,7 +135,15 @@
               Choose File
               <input id="file-input" type="file" accept=".csv,.xlsx" />
             </label>
+            <p class="sample-cta">
+              Don't have a file? <button type="button" id="sample-data-btn" class="link-btn">Try it with sample data</button>
+            </p>
           </div>
+          <p class="meta" id="sample-note" style="display:none;">
+            <strong>Sample data.</strong> This is a synthetic 14-day record created to demonstrate the
+            analysis — realistic in shape (daily traffic peaks and a multi-day pollution episode) but
+            <strong>not a measurement from any real location</strong>. Numbers shown are for illustration only.
+          </p>
           <p class="meta"><strong>No file yet?</strong> In the PurpleAir dashboard, open your sensor → <em>Download Data</em> → export a CSV or XLSX (0-, 2-, or 10-minute average — all work).</p>
           <p class="meta">One file per analysis. Dual-sensor setups are detected automatically. To compare multiple houses, run one analysis first, then use the <strong>Compare Houses</strong> panel.</p>
           <div id="loading" class="loading hidden">
@@ -227,6 +236,20 @@
           </div>
         </section>
 
+        <div class="view-switch" id="view-switch">
+          <span class="view-switch-label">View</span>
+          <div class="view-switch-buttons" role="group" aria-label="Detail level">
+            <button type="button" class="view-btn is-active" data-view="essentials"
+                    aria-pressed="true">Essentials</button>
+            <button type="button" class="view-btn" data-view="advanced"
+                    aria-pressed="false">Advanced</button>
+          </div>
+          <span class="view-switch-note" id="view-switch-note">
+            The headline results, charts and reports. Switch to Advanced for statistical tests,
+            correction comparisons and methods.
+          </span>
+        </div>
+
         <section class="section overview">
           <h2>Overview</h2>
           <div id="overview-cards" class="cards"></div>
@@ -240,7 +263,7 @@
           </div>
         </section>
 
-        <section class="section timeframe-selector">
+        <section class="section timeframe-selector" data-advanced>
           <h2>Refine Analysis by Timeframe</h2>
           <p class="section-note">Select a specific date range to regenerate reports and visualizations for that period.</p>
           <div class="timeframe-controls">
@@ -262,7 +285,7 @@
           </div>
         </section>
 
-        <section class="section detected">
+        <section class="section detected" data-advanced>
           <h2>Data Completeness &amp; Inputs</h2>
           <p class="section-note">What the uploaded file contains, and the impact of anything important that is missing.</p>
           <div id="data-completeness"></div>
@@ -386,7 +409,7 @@
           </div>
         </section>
 
-        <section class="section correction-section">
+        <section class="section correction-section" data-advanced>
           <h2>PM2.5 Correction Formula Comparison</h2>
           <p class="section-note">Compare how three correction equations translate raw sensor readings. The main analysis uses EPA Barkjohn.</p>
 
@@ -402,7 +425,7 @@
           <div id="correction-formula-card" class="formula-card">
             <div class="formula-row" id="formula-barkjohn">
               <span class="formula-name active-formula">EPA Barkjohn (2021)</span>
-              <code>PM2.5 = 0.534 × raw − 0.0844 × RH + 5.604</code>
+              <code>PM2.5 = 0.524 × raw − 0.0862 × RH + 5.75</code>
               <span class="formula-note">Standard for PurpleAir sensors; humidity-corrected. Used for all main analysis.</span>
             </div>
             <div class="formula-row" id="formula-lrapa">
@@ -430,7 +453,7 @@
           </div>
         </section>
 
-        <section class="section tables">
+        <section class="section tables" data-advanced>
           <h2>Statistics and events</h2>
           <div class="table-grid">
             <div class="table-card">
@@ -455,7 +478,7 @@
           </div>
         </section>
 
-        <section class="section custom-notes-section" id="custom-notes-section">
+        <section class="section custom-notes-section" id="custom-notes-section" data-advanced>
           <h2>Custom Notes for Report</h2>
           <p class="section-note">Add notes, observations, or commentary here. Each note will appear as a dedicated section in the generated PDF report.</p>
           <div id="custom-notes-list"></div>
@@ -513,7 +536,7 @@
           </div>
         </section>
 
-        <section class="section methods-references">
+        <section class="section methods-references" data-advanced>
           <h2>Methods &amp; Standards</h2>
           <p class="section-note">Every metric on this platform is traceable to a published method or an official health standard. These are the primary sources — citable directly in research, regulatory, and community documentation.</p>
 
@@ -616,6 +639,10 @@
             This platform is developed for research and educational purposes. Data analysis outputs are intended to support environmental health research and should not replace regulatory monitoring or clinical decision-making. EPA Barkjohn correction (Barkjohn et al., 2021) applied to all PM<sub>2.5</sub> readings. Results are subject to sensor limitations and site-specific conditions.
           </p>
           <p class="footer-copy">Developed at Johns Hopkins Bloomberg School of Public Health &middot; 2026</p>
+          <p class="footer-copy">
+            &copy; 2026 C. P. Choudhary. All rights reserved. Source published for transparency and
+            scientific verification; reuse, redistribution or redeployment requires written permission.
+          </p>
         </div>
       </div>
     </footer>

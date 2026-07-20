@@ -9,7 +9,7 @@ VISUAL_EXPLANATIONS = {
         "what_it_shows": "Temporal evolution of fine particulate matter (PM2.5) concentration over the monitoring period",
         "research": """
         METHODOLOGY: Continuous monitoring at 2-minute resolution with EPA Barkjohn correction factor applied 
-        (0.534×PM + 5.604 − 0.0844×RH). Raw data shown in blue; EPA-corrected in orange. Physical gaps enforced 
+        (0.524×PM + 5.75 − 0.0862×RH). Raw data shown in blue; EPA-corrected in orange. Physical gaps enforced 
         using asfreq('2T') to prevent false visual continuity across network outages.
         
         INTERPRETATION: Peaks indicate pollution episodes. Divergence between blue and orange lines reveals 
@@ -71,7 +71,7 @@ VISUAL_EXPLANATIONS = {
         - R² > 0.95: Research-grade data. Both sensors functioning nominally.
         - 0.85 < R² < 0.95: Acceptable for most applications. Monitor for drift.
         - R² < 0.85: Sensor malfunction likely. One channel may require recalibration.
-        - CV < 10%: EXCELLENT consistency (JHU/MIT standard).
+        - CV < 10%: EXCELLENT consistency (stricter than the EPA CV ≤ 30% sensor target).
         - 10% ≤ CV < 15%: ACCEPTED consistency with operational monitoring recommended.
         - CV ≥ 15%: INVALID. Sensor maintenance required.
         
@@ -228,7 +228,7 @@ VISUAL_EXPLANATIONS = {
     
     "Sensor Performance": {
         "section_description": """
-        DUAL-CHANNEL CONSISTENCY VALIDATION (JHU/MIT Standard)
+        DUAL-CHANNEL CONSISTENCY VALIDATION
         
         PurpleAir devices house two independent PM2.5 sensors. Agreement between them validates data reliability.
         R² > 0.95 (or CV < 10%) indicates research-grade quality. Disagreement flags sensor malfunction, contamination,
@@ -277,8 +277,8 @@ REPORT_SECTIONS = {
 
 ### Purpose
 This report presents a comprehensive air quality analysis of PM2.5 (fine particulate matter) concentrations 
-measured using dual-channel PurpleAir sensors. The analysis adheres to JHU/MIT atmospheric research standards 
-and EPA quality assurance guidelines.
+measured using dual-channel PurpleAir sensors. Corrections follow Barkjohn et al. (2021) as adopted by the U.S. EPA,
+and sensor-performance metrics are reported against EPA air-sensor target values (EPA, 2021).
 
 ### Background
 PM2.5 particles (diameter <2.5 microns) penetrate deep into the respiratory system and are associated with 
@@ -328,7 +328,7 @@ cardiovascular and respiratory health effects per EPA and WHO guidelines. Contin
 ### Correction Factors Applied
 **EPA Barkjohn Correction (Downwind EPA Office):**
 ```
-PM2.5_corrected = 0.534 × PM2.5_raw + 5.604 − 0.0844 × RH
+PM2.5_corrected = 0.524 × PM2.5_raw + 5.75 − 0.0862 × RH
 ```
 Applicable when humidity data available. Reduces low-RH bias; improves correlation with reference monitors (r = 0.97 vs reference).
 
@@ -498,8 +498,9 @@ Quality Score of {quality_score}% {publication_recommendation}
 {regulatory_implications}
 
 **Research Value:**
-This dataset provides {research_value_statement}. EPA-corrected concentrations and dual-channel validation 
-enable peer-reviewed publication and regulatory agency acceptance.
+This dataset provides {research_value_statement}. EPA-corrected concentrations and dual-channel validation
+give the documented provenance that research and regulatory submissions require. Whether any dataset is
+accepted for publication or by an agency remains their determination, not a property of this analysis.
 
 ### Final Assessment
 {final_assessment}

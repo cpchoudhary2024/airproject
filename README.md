@@ -6,7 +6,7 @@ colorTo: green
 sdk: docker
 app_port: 7860
 pinned: false
-license: mit
+license: other
 short_description: EPA-corrected PurpleAir PM2.5 analysis & reports
 tags:
   - air-quality
@@ -19,7 +19,7 @@ tags:
 
 # 🌬️ PurpleAir Air Quality Analyzer
 
-**Turn a raw PurpleAir CSV/XLSX export into a research-grade air-quality analysis in seconds.**
+**Turn a raw PurpleAir CSV/XLSX export into a documented, reproducible air-quality analysis in seconds.**
 Upload one file and get EPA-corrected PM2.5 trends, sensor-health validation, pollution-event
 detection, and downloadable regulatory- and community-ready PDF reports — all computed in your
 session. Nothing is persisted after your session ends.
@@ -40,7 +40,7 @@ settings.
 | **EPA Barkjohn (2021) humidity correction** | ✅ applied + auditable formula | ⚠️ varies / hidden |
 | **Multi-formula comparison** (Barkjohn · LRAPA · AQ&U) | ✅ side-by-side | ❌ |
 | **Dual-channel A/B agreement & drift detection** | ✅ | ❌ |
-| **Data-quality score & completeness audit** | ✅ JHU/MIT quality score | ❌ |
+| **Data-quality score & completeness audit** | ✅ transparent, published scoring rule | ❌ |
 | **STL trend/seasonality decomposition** | ✅ | ❌ |
 | **Pollution-event detection & ranking** | ✅ | Partial |
 | **House-vs-control comparison** | ✅ up to 10 sites | ❌ |
@@ -105,6 +105,18 @@ Guidelines** and the **US EPA PM NAAQS**; trend separation uses **STL decomposit
 
 FastAPI · pandas / NumPy / SciPy · statsmodels (STL) · Matplotlib + Plotly · ReportLab · Docker on
 Hugging Face Spaces.
+
+---
+
+## Licence & attribution
+
+**Copyright (c) 2026 C. P. Choudhary. All rights reserved.** This source is published for
+transparency and scientific verification, not for reuse: copying, redistribution, derivative
+works, and commercial use require prior written permission. See [LICENSE](LICENSE).
+
+The underlying science is public and freely usable — the EPA-adopted correction of
+[Barkjohn et al. (2021)](https://doi.org/10.5194/amt-14-4617-2021), the WHO Air Quality
+Guidelines, and the US EPA NAAQS are cited here, not owned.
 
 ---
 

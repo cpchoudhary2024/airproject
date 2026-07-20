@@ -1,0 +1,40 @@
+Copyright (c) 2026 C. P. Choudhary. All rights reserved.
+
+PurpleAir Air Quality Analyzer — proprietary software.
+
+This source code is made publicly viewable for transparency, peer review, and
+verification of the scientific methods it implements. Public visibility does not
+place it in the public domain and does not grant a licence to reuse it.
+
+PERMITTED WITHOUT PRIOR PERMISSION
+  1. Viewing and reading this source code.
+  2. Running the software locally for the purpose of evaluating or verifying its
+     methods and results.
+  3. Quoting short excerpts for academic review, teaching, or commentary, with
+     attribution to the copyright holder.
+
+NOT PERMITTED WITHOUT PRIOR WRITTEN PERMISSION
+  1. Copying, publishing, hosting, or deploying this software or any substantial
+     part of it, in original or modified form, under any name.
+  2. Creating derivative works, including translations to another language or
+     framework that reproduce the structure, methods, or interface of this work.
+  3. Any commercial use.
+  4. Removing, altering, or obscuring this notice or the authorship and
+     provenance information embedded in the application and its generated reports.
+
+SCOPE OF THIS NOTICE
+This notice covers the original work in this repository: application code,
+interface, report templates, and documentation. It does not, and cannot, extend
+to the underlying published science, which remains freely usable by anyone. In
+particular the U.S. EPA-adopted correction of Barkjohn, Gantt & Clements (2021),
+Atmospheric Measurement Techniques 14, 4617-4637 (doi:10.5194/amt-14-4617-2021),
+the WHO Air Quality Guidelines, and the U.S. EPA NAAQS are public standards and
+are cited, not owned, here. Third-party libraries remain under their own licences.
+
+NO WARRANTY
+This software is provided "as is", without warranty of any kind, express or
+implied. The outputs support but do not replace regulatory monitoring or clinical
+decision-making, and the copyright holder accepts no liability arising from their
+use.
+
+For permission requests, contact the copyright holder.

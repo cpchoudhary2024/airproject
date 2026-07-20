@@ -88,3 +88,6 @@ quickstart.sh
 # Generated evidence reports (binary; kept out of git — HF rejects non-LFS binaries)
 Report_*.pdf
 Report_*.docx
+Community_Air_Quality_Report*.docx
+Defense_Notes_Methods.docx
+build_defense_notes.py

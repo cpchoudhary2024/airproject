@@ -1559,6 +1559,35 @@ function setupDropzone() {
     }
     handleSingleFile(files?.[0]);
   });
+
+  // "Try it with sample data" — fetches the generated demo export and runs it
+  // through the identical analysis path a real upload takes.
+  const sampleBtn = document.getElementById('sample-data-btn');
+  if (sampleBtn) {
+    sampleBtn.addEventListener('click', async () => {
+      const original = sampleBtn.textContent;
+      sampleBtn.disabled = true;
+      sampleBtn.textContent = 'Loading sample…';
+      try {
+        const res = await fetch('/api/sample-data');
+        if (!res.ok) throw new Error(`sample data unavailable (${res.status})`);
+        const blob = await res.blob();
+        const file = new File([blob], 'SAMPLE_purpleair_demo_14days.csv', { type: 'text/csv' });
+        const note = document.getElementById('sample-note');
+        if (note) note.style.display = '';
+        const deviceField = document.getElementById('device-id-input');
+        const locField = document.getElementById('location-input');
+        if (deviceField && !deviceField.value) deviceField.value = 'SAMPLE DATA — not a real sensor';
+        if (locField && !locField.value) locField.value = 'Demonstration dataset';
+        handleSingleFile(file);
+      } catch (err) {
+        alert(`Could not load the sample data: ${err.message}`);
+      } finally {
+        sampleBtn.disabled = false;
+        sampleBtn.textContent = original;
+      }
+    });
+  }
 }
 
 // Show the optional "timezone name" field only when "No conversion" is chosen.
@@ -2163,3 +2192,37 @@ if (correctionSelect) {
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// Essentials / Advanced view switch.
+// Sections tagged [data-advanced] stay hidden until the user opts in, so the
+// default dashboard reads as a result rather than a wall of statistics. The
+// choice is remembered per browser. Display-only: nothing is recomputed.
+// ---------------------------------------------------------------------------
+(function initViewSwitch() {
+  const sw = document.getElementById('view-switch');
+  if (!sw) return;
+  const buttons = sw.querySelectorAll('.view-btn');
+  const note = document.getElementById('view-switch-note');
+  const NOTES = {
+    essentials: 'The headline results, charts and reports. Switch to Advanced for statistical tests, correction comparisons and methods.',
+    advanced: 'Everything: timeframe refinement, correction-formula comparison, full statistics, custom report notes and method citations.',
+  };
+
+  function apply(view) {
+    document.body.classList.toggle('show-advanced', view === 'advanced');
+    buttons.forEach((b) => {
+      const on = b.dataset.view === view;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    if (note) note.textContent = NOTES[view] || '';
+    try { localStorage.setItem('pair_view', view); } catch (_) { /* private mode */ }
+  }
+
+  buttons.forEach((b) => b.addEventListener('click', () => apply(b.dataset.view)));
+
+  let saved = 'essentials';
+  try { saved = localStorage.getItem('pair_view') || 'essentials'; } catch (_) { /* private mode */ }
+  apply(saved === 'advanced' ? 'advanced' : 'essentials');
+})();

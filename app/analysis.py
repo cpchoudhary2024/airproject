@@ -176,6 +176,23 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, List[DetectedColumn]]:
     for key in detected:
         detected[key].sort(key=lambda item: item.confidence, reverse=True)
 
+    # PM2.5 variant preference: cf_1 outranks atm.
+    #
+    # PurpleAir exports two calibrations of the same measurement — "cf_1" and "atm".
+    # The EPA-adopted Barkjohn (2021) correction was derived on, and is defined for,
+    # cf_1 input ("PM2.5 = 0.524 x PA_cf_1 - 0.0862 x RH + 5.75"). Feeding atm data
+    # into it applies the right equation to the wrong input: the two calibrations
+    # diverge as concentration rises, so peaks are materially understated. Name/range
+    # confidence alone cannot distinguish them, so the preference is explicit here.
+    def _pm25_variant_rank(name: str) -> int:
+        n = normalize_col(name)
+        if "cf_1" in n or "cf1" in n:
+            return 0          # preferred: the correction's defined input
+        if "atm" in n:
+            return 2          # usable, but only when no cf_1 column exists
+        return 1              # unlabelled PM2.5 column
+    detected["pm25"].sort(key=lambda item: (_pm25_variant_rank(item.name), -item.confidence))
+
     return detected
 
 
@@ -187,15 +204,63 @@ def choose_channels(
     detected: List[DetectedColumn],
 ) -> Tuple[Optional[DetectedColumn], Optional[DetectedColumn], Optional[DetectedColumn]]:
     primary = pick_best(detected)
-    channel_a = next((d for d in detected if d.channel == "A"), None)
-    channel_b = next((d for d in detected if d.channel == "B"), None)
-    return primary, channel_a, channel_b
+
+    # Keep A/B in the same calibration family as the primary (cf_1 vs atm). Mixing
+    # them would compare a cf_1 primary against atm channels, so the A/B agreement
+    # statistics would describe two different calibrations rather than two sensors.
+    def _family(name: str) -> str:
+        n = normalize_col(name)
+        if "cf_1" in n or "cf1" in n:
+            return "cf_1"
+        return "atm" if "atm" in n else ""
+
+    want = _family(primary.name) if primary else ""
+
+    def _pick(ch: str) -> Optional[DetectedColumn]:
+        same = [d for d in detected if d.channel == ch and _family(d.name) == want]
+        if same:
+            return same[0]
+        return next((d for d in detected if d.channel == ch), None)
+
+    return primary, _pick("A"), _pick("B")
+
+
+# Barkjohn et al., Atmospheric Measurement Techniques 14, 4617 (2021) — the US-wide
+# correction adopted by the U.S. EPA for the AirNow Fire & Smoke Map. These are the
+# single source of truth for the coefficients: every displayed formula, worked
+# example and reproducibility record is rendered from them, so the number the app
+# computes and the number it claims to compute cannot drift apart.
+BARKJOHN_PM_COEF = 0.524
+BARKJOHN_RH_COEF = 0.0862
+BARKJOHN_INTERCEPT = 5.75
+BARKJOHN_FORMULA = (
+    f"{BARKJOHN_PM_COEF} x PA_cf1 - {BARKJOHN_RH_COEF} x RH + {BARKJOHN_INTERCEPT}"
+)
+BARKJOHN_CITATION = (
+    "Barkjohn, Gantt & Clements (2021), Development and application of a United States-wide "
+    "correction for PM2.5 data collected with the PurpleAir sensor, Atmospheric Measurement "
+    "Techniques 14, 4617-4637, Eq. 10. doi:10.5194/amt-14-4617-2021"
+)
+BARKJOHN_DOI = "https://doi.org/10.5194/amt-14-4617-2021"
+
+
+def barkjohn_corrected(pm: float, rh: float) -> float:
+    """Scalar form of the correction — used for the worked examples shown to users so
+    they are computed by the same code path as the data, never typed by hand."""
+    return BARKJOHN_PM_COEF * pm - BARKJOHN_RH_COEF * rh + BARKJOHN_INTERCEPT
 
 
 def apply_epa_correction(pm25: pd.Series, rh: pd.Series) -> pd.Series:
+    """Apply the EPA-adopted Barkjohn (2021) correction, exactly as published.
+
+    No coefficient is refitted here. On cool, clean, humid readings the humidity term
+    can drive the result slightly below zero; a negative mass concentration is
+    unphysical, so results are clipped at 0 — the same convention used for the LRAPA
+    and AQ&U corrections below.
+    """
     pm = pd.to_numeric(pm25, errors="coerce")
     humid = pd.to_numeric(rh, errors="coerce")
-    return 0.534 * pm - 0.0844 * humid + 5.604
+    return (BARKJOHN_PM_COEF * pm - BARKJOHN_RH_COEF * humid + BARKJOHN_INTERCEPT).clip(lower=0)
 
 
 def apply_lrapa_correction(pm: pd.Series) -> pd.Series:
@@ -463,12 +528,35 @@ def convert_utc_hour_to_lst(utc_hour: int, offset_hours: Optional[float]) -> Tup
 
 
 def calc_aqi_value(pm: float) -> Tuple[int, str, str]:
-    if math.isnan(pm):
+    """PM2.5 -> AQI using the EPA breakpoint table above.
+
+    The concentration is TRUNCATED to one decimal place first, as specified in EPA's
+    AQI Technical Assistance Document. This is not cosmetic: the published breakpoints
+    are edge-to-edge on a 0.1 grid (… 9.0 | 9.1 …), so an untruncated value such as
+    9.05 falls between two bins and matches none. Previously such values returned
+    AQI 0 / "Unknown", which — being zero — pulled any downstream AQI average
+    *downwards* and made air quality look better than it was.
+    """
+    if pm is None or (isinstance(pm, float) and math.isnan(pm)):
         return 0, "Unknown", "#9E9E9E"
+    try:
+        pm_val = float(pm)
+    except (TypeError, ValueError):
+        return 0, "Unknown", "#9E9E9E"
+    if pm_val < 0:
+        return 0, "Unknown", "#9E9E9E"
+    # Truncate toward zero to one decimal (EPA convention), avoiding binary-float
+    # surprises such as 35.5 -> 35.4.
+    pm_trunc = math.floor(round(pm_val, 6) * 10.0) / 10.0
     for c_low, c_high, a_low, a_high, label, color in AQI_BREAKPOINTS:
-        if c_low <= pm <= c_high:
-            aqi = round(((a_high - a_low) / (c_high - c_low)) * (pm - c_low) + a_low)
+        if c_low <= pm_trunc <= c_high:
+            aqi = round(((a_high - a_low) / (c_high - c_low)) * (pm_trunc - c_low) + a_low)
             return int(aqi), label, color
+    # Above the top breakpoint the AQI scale is capped at 500 (EPA does not define
+    # values beyond it), rather than reported as unknown.
+    top = AQI_BREAKPOINTS[-1]
+    if pm_trunc > top[1]:
+        return 500, top[4], top[5]
     return 0, "Unknown", "#9E9E9E"
 
 
@@ -499,10 +587,24 @@ def detect_events(df: pd.DataFrame, pm_col: str) -> pd.DataFrame:
     if series.empty:
         return pd.DataFrame(columns=_empty_cols)
 
-    rolling_med = series.rolling(12, min_periods=6).median()
-    rolling_std = series.rolling(12, min_periods=6).std().fillna(0)
+    # Time-based baseline window, not a fixed sample count.
+    #
+    # A `rolling(12)` window means 24 minutes on a 2-minute export but 12 hours on an
+    # hourly one, so the same physical episode was detected differently depending on
+    # which averaging interval the user happened to download. A fixed 2-hour window
+    # keeps the detector's meaning constant across export intervals.
+    _win = "2h"
+    if isinstance(series.index, pd.DatetimeIndex) and len(series) > 2:
+        rolling_med = series.rolling(_win, min_periods=3).median()
+        rolling_std = series.rolling(_win, min_periods=3).std().fillna(0)
+    else:
+        rolling_med = series.rolling(12, min_periods=6).median()
+        rolling_std = series.rolling(12, min_periods=6).std().fillna(0)
     spikes = series > (rolling_med + 3 * rolling_std)
 
+    # 35 µg/m³ is the EPA 24-hour standard, used here as a "clearly elevated" level
+    # for sustained (>=3 h) episodes -- not as a compliance determination, which
+    # requires a 24-hour average.
     elevated = series > 35
 
     def _event_segment(s, t_start, t_end):
@@ -541,11 +643,15 @@ def detect_events(df: pd.DataFrame, pm_col: str) -> pd.DataFrame:
                     "peak_timestamp": peak_idx, "type": label,
                 })
                 start = None
+        # Close an episode that is still in progress when the record ends. This must
+        # cover BOTH labels: an ongoing spike at the final timestamp was previously
+        # discarded, losing the most recent -- often most relevant -- episode. The
+        # segment is taken inclusive of the last sample, so its peak is not truncated.
         if start is not None:
             end = mask.index[-1]
             duration = (end - start).total_seconds() / 3600.0
-            if label == "Sustained" and duration >= 3:
-                segment = _event_segment(series, start, end)
+            if label != "Sustained" or duration >= 3:
+                segment = series.loc[start:end]
                 if not segment.empty:
                     peak_idx = segment.idxmax()
                     peak_val = round(float(segment.max()), 2)
@@ -881,7 +987,7 @@ def build_report_markdown(summary: Dict[str, Any], quality_rows: List[Dict[str, 
         "",
         "### 3.5 Correction Factors Applied",
         "",
-        "- **EPA PM2.5 Correction:** Corrected = 0.534 × PM + 5.604 − 0.0844 × RH",
+        "- **EPA PM2.5 Correction:** Corrected = 0.524 × PM + 5.75 − 0.0862 × RH",
         "  (Applied when relative humidity data available)",
         "- **Channel Averaging:** When dual channels present, average used for final PM2.5",
         "- **Rolling Medians:** 24-hour and 7-day medians calculated to smooth hourly noise",
@@ -913,7 +1019,9 @@ def build_report_markdown(summary: Dict[str, Any], quality_rows: List[Dict[str, 
                 pass
         lines.append("")
     
-    lines.append(f"**Period Average PM2.5:** {summary['pm25_average']} µg/m³ (with observed range and variability shown above)")
+    _period_avg = summary.get("pm25_average_epa_corrected") or summary.get("pm25_average")
+    lines.append(f"**Period Average PM2.5 (EPA-corrected):** {_period_avg} µg/m³ "
+                 f"(with observed range and variability shown above)")
     lines.append("")
     
     lines.extend([
@@ -1164,7 +1272,7 @@ def build_rolling_medians(series: pd.Series) -> pd.DataFrame:
 def build_decomposition(series: pd.Series, period: int = None) -> pd.DataFrame:
     """STL decomposition with intelligent period detection for stochastic pollution events.
     
-    JHU/MIT STANDARD: Period determines seasonal cycle length.
+    Period determines seasonal cycle length.
     - Hourly data: period=24 (24-hour cycle)
     - 2-minute data: period=720 (24 hours @ 2min intervals)
     - Auto-adjusts if data length insufficient (minimum 2×period points required)
@@ -1283,16 +1391,23 @@ def build_sensor_drift(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def build_radar_profile(cleaned: pd.DataFrame, quality_score: float, channel_agreement: Dict[str, Any], coverage_score: float = 100) -> Dict[str, Any]:
-    """Build multi-dimensional radar chart data showing data quality profile."""
+def build_radar_profile(cleaned: pd.DataFrame, quality_score: float, channel_agreement: Dict[str, Any],
+                        coverage_score: float = 100, n_rows_submitted: Optional[int] = None) -> Dict[str, Any]:
+    """Build multi-dimensional radar chart data showing DATA quality (not air quality)."""
     if cleaned.empty:
         return {"labels": [], "values": []}
-    
+
     # Calculate various metrics (0-100 scale)
     metrics = {}
-    
-    # 1. Internal Data Integrity (% of rows with valid PM2.5) - renamed from "Data Completeness"
-    metrics["Internal Data Integrity"] = min(100, (cleaned["pm25"].notna().sum() / len(cleaned)) * 100) if len(cleaned) > 0 else 0
+
+    # 1. Internal Data Integrity — the share of SUBMITTED rows that survived validation.
+    #    This must be measured against the rows as supplied, not against `cleaned`:
+    #    `cleaned` is already filtered to valid PM2.5, so scoring it against itself
+    #    always returned exactly 100% and the axis could never register a problem.
+    if n_rows_submitted and n_rows_submitted > 0:
+        metrics["Internal Data Integrity"] = round(min(100.0, len(cleaned) / n_rows_submitted * 100.0), 1)
+    else:
+        metrics["Internal Data Integrity"] = 100.0
     
     # 2. Temporal Completeness (coverage accounting for gaps) - NEW AXIS
     metrics["Temporal Completeness"] = coverage_score
@@ -1321,20 +1436,29 @@ def build_radar_profile(cleaned: pd.DataFrame, quality_score: float, channel_agr
         metrics["Inter-Channel Stability"] = 50  # Unknown / single channel
     
     # 6. Reading Frequency (how often measurements taken)
-    if "timestamp" in cleaned.index.names or isinstance(cleaned.index, pd.DatetimeIndex):
-        time_range = (cleaned.index.max() - cleaned.index.min()).total_seconds() / 3600  # hours
-        readings_per_hour = len(cleaned) / time_range if time_range > 0 else 0
-        metrics["Measurement Frequency"] = min(100, readings_per_hour * 25)  # normalize to 100
+    # 6. Sampling Regularity — how consistently readings arrive at the interval this
+    #    export actually uses, rather than how short that interval is. The previous
+    #    `readings_per_hour * 25` scored a flawless hourly export at 25/100 while a
+    #    2-minute export scored 100, penalising the user's download choice instead of
+    #    measuring data quality. Here the sensor's own median interval sets the
+    #    expectation, so any interval can score full marks if the record is unbroken.
+    if isinstance(cleaned.index, pd.DatetimeIndex) and len(cleaned) > 2:
+        deltas = pd.Series(cleaned.index).diff().dt.total_seconds().dropna()
+        nominal = float(deltas.median()) if not deltas.empty else 0.0
+        span_s = (cleaned.index.max() - cleaned.index.min()).total_seconds()
+        if nominal > 0 and span_s > 0:
+            expected = span_s / nominal + 1
+            metrics["Sampling Regularity"] = round(min(100.0, len(cleaned) / expected * 100.0), 1)
+        else:
+            metrics["Sampling Regularity"] = 50.0
     else:
-        metrics["Measurement Frequency"] = 50
-    
-    # 7. EPA Compliance (% of time below EPA threshold)
-    if "pm25_corrected" in cleaned.columns:
-        epa_compliant = (cleaned["pm25_corrected"] <= 35).sum() / len(cleaned) * 100 if len(cleaned) > 0 else 0
-    else:
-        epa_compliant = (cleaned["pm25"] <= 35).sum() / len(cleaned) * 100 if len(cleaned) > 0 else 0
-    metrics["EPA Compliance"] = epa_compliant
-    
+        metrics["Sampling Regularity"] = 50.0
+
+    # NOTE: an "EPA Compliance" axis (share of readings below 35 µg/m³) was removed
+    # from this profile. It measures AIR quality, not DATA quality: a well-run sensor
+    # at a genuinely polluted site would be marked down for reporting the pollution it
+    # exists to detect. Exceedance counts are reported separately, where they belong.
+
     return {
         "labels": list(metrics.keys()),
         "values": [max(0, min(100, v)) for v in metrics.values()],  # Ensure 0-100 range
@@ -1360,11 +1484,25 @@ def build_pm25_temporal_radar(
     # Use EPA-corrected PM2.5 to stay consistent with every other figure and
     # number in the report (averages, daily table, exceedances all use corrected).
     temp_df = cleaned.copy()
-    temp_df["hour"] = temp_df.index.hour
-    _pm_src = (temp_df["pm25_corrected"].fillna(temp_df["pm25"])
-               if "pm25_corrected" in temp_df.columns else temp_df["pm25"])
+    if "pm25_corrected" in temp_df.columns:
+        _pm_src = (temp_df["pm25_corrected"].fillna(temp_df["pm25"])
+                  if "pm25" in temp_df.columns else temp_df["pm25_corrected"])
+    else:
+        _pm_src = temp_df["pm25"]
     temp_df = temp_df.assign(_pm_src=_pm_src)
-    hourly_avg = temp_df.groupby("hour")["_pm_src"].mean().reindex(range(24), fill_value=0)
+
+    # Average each clock hour FIRST, then average those hourly values by hour-of-day.
+    # Grouping the raw 2-minute readings directly would weight each hour-of-day by how
+    # many samples it happens to contain, so a densely-recorded stretch would dominate
+    # the "typical day" profile whenever coverage is uneven (this dataset is ~66%).
+    if isinstance(temp_df.index, pd.DatetimeIndex) and len(temp_df) > 1:
+        _hourly = temp_df["_pm_src"].resample("1h").mean().dropna()
+        hourly_avg = _hourly.groupby(_hourly.index.hour).mean().reindex(range(24))
+    else:
+        hourly_avg = temp_df.groupby(temp_df.index.hour)["_pm_src"].mean().reindex(range(24))
+    # An hour that was never sampled is absent, not clean: filling it with 0 would draw
+    # a spurious trough at the cleanest possible concentration.
+    hourly_avg = hourly_avg.astype(float)
 
     # Build a readable timezone label for the chart axis
     if _tz_is_as_recorded(tz_label):
@@ -1383,14 +1521,17 @@ def build_pm25_temporal_radar(
     else:
         offset_label = " UTC"
 
-    max_pm = max(hourly_avg.max(), 0.1)
+    max_pm = max(float(hourly_avg.max()) if hourly_avg.notna().any() else 0.1, 0.1)
     # Show only the hour number on each tick; the timezone is stated once in the
     # chart title (and caption), so per-tick suffixes would only add clutter.
     labels = [f"{int(h):02d}" for h in hourly_avg.index]
+    # NaN is not valid JSON for a browser parser; emit null so an unsampled hour
+    # renders as a gap rather than as a zero reading.
+    values = [None if v != v else round(float(v), 4) for v in hourly_avg.tolist()]
 
     return {
         "labels": labels,
-        "values": hourly_avg.tolist(),
+        "values": values,
         "max_value": max_pm,
         "type": "hourly_pm25_pattern",
         "offset_label": offset_label,
@@ -2215,22 +2356,22 @@ def build_report_pdf(
     _rh_max_v   = summary.get("rh_max")
     _pm25_raw_v = summary.get("pm25_average", 0.0)
     if _hum_used and _mean_rh_v is not None:
-        _ex_corr = round(0.534 * _pm25_raw_v - 0.0844 * _mean_rh_v + 5.604, 2)
+        _ex_corr = round(barkjohn_corrected(_pm25_raw_v, _mean_rh_v), 2)
         _bk_text = (
             f"EPA Barkjohn Correction (Barkjohn et al., 2021): Raw PurpleAir laser-scattering readings "
             f"overestimate true PM2.5, especially at high humidity. The full correction formula — "
-            f"Corrected PM2.5 = 0.534 × raw_PM − 0.0844 × RH + 5.604 — was applied to every reading "
+            f"Corrected PM2.5 = 0.524 × raw_PM − 0.0862 × RH + 5.75 — was applied to every reading "
             f"in this dataset using the concurrent per-reading relative humidity (RH). "
             f"Humidity was available throughout this dataset: mean RH = {_mean_rh_v}% "
             f"(range {_rh_min_v}–{_rh_max_v}%). "
-            f"Example using the dataset mean values: 0.534 × {_pm25_raw_v} − 0.0844 × {_mean_rh_v} "
-            f"+ 5.604 = {_ex_corr} µg/m³ (corrected from {_pm25_raw_v} µg/m³ raw)."
+            f"Example using the dataset mean values: 0.524 × {_pm25_raw_v} − 0.0862 × {_mean_rh_v} "
+            f"+ 5.75 = {_ex_corr} µg/m³ (corrected from {_pm25_raw_v} µg/m³ raw)."
         )
     else:
         _bk_text = (
             "EPA Barkjohn Correction (Barkjohn et al., 2021): Raw PurpleAir laser-scattering readings "
             "overestimate true PM2.5, especially at high humidity. The full formula is: "
-            "Corrected PM2.5 = 0.534 × raw_PM − 0.0844 × RH + 5.604. "
+            "Corrected PM2.5 = 0.524 × raw_PM − 0.0862 × RH + 5.75. "
             "Relative humidity was NOT available for this dataset, so the humidity-dependent Barkjohn "
             "correction could not be applied. Uncorrected (raw) PM2.5 is reported instead. Because raw "
             "PurpleAir readings tend to overestimate at elevated humidity, the reported values should be "
@@ -2327,11 +2468,11 @@ def build_report_pdf(
         _sp_rh_mx = summary.get("rh_max")
         _sp_pm    = summary.get("pm25_average", 0.0)
         if _sp_hum and _sp_rh is not None:
-            _sp_corr = round(0.534 * _sp_pm - 0.0844 * _sp_rh + 5.604, 2)
+            _sp_corr = round(barkjohn_corrected(_sp_pm, _sp_rh), 2)
             draw_wrapped(
                 f"EPA Barkjohn correction applied per reading using concurrent RH. "
                 f"Dataset RH: mean {_sp_rh}%, range {_sp_rh_mn}–{_sp_rh_mx}%. "
-                f"Worked example (dataset means): 0.534 × {_sp_pm} − 0.0844 × {_sp_rh} + 5.604 = {_sp_corr} µg/m³.",
+                f"Worked example (dataset means): 0.524 × {_sp_pm} − 0.0862 × {_sp_rh} + 5.75 = {_sp_corr} µg/m³.",
                 indent=12, font_size=9, color=(0.30, 0.30, 0.30)
             )
         else:
@@ -2404,7 +2545,9 @@ def build_report_pdf(
          "R² = 0.85 means the two channels explain 85% of each other's variation — the standard research-grade threshold."),
         ("CV (Coefficient of Variation)",
          "The average absolute difference between Channel A and Channel B divided by the mean PM2.5, expressed as a "
-         "percentage. CV < 10% = excellent (JHU/MIT tier); CV 10–15% = acceptable; CV ≥ 15% = the reading pair should be flagged."),
+         "percentage. This platform flags CV < 10% as excellent, 10–15% as acceptable, and ≥ 15% as a pair that "
+         "should be inspected — deliberately stricter than the U.S. EPA's published precision target for PM2.5 air "
+         "sensors (CV ≤ 30%; EPA Performance Testing Protocols, Metrics, and Target Values, 2021)."),
         ("LDL (Lower Detection Limit)",
          "The smallest concentration a Plantower laser sensor can reliably distinguish from zero (~1 µg/m³). "
          "Values below this limit are corrected to LDL/√2 ≈ 0.707 µg/m³ to avoid zero-bias in statistics."),
@@ -2449,10 +2592,20 @@ def build_report_pdf(
         section_header("4b.", "Statistical Trend, Uncertainty & Exposure")
         if _tt:
             draw_line("Trend test (Mann-Kendall · Theil-Sen · Pettitt):", indent=12, font_size=10, bold=True)
-            _ci = _tt.get("sen_slope_ci") or ["N/A", "N/A"]
+            _dci = _tt.get("sen_slope_per_day_ci") or ["N/A", "N/A"]
             draw_line(
-                f"Theil-Sen slope: {_tt.get('sen_slope_per_year')} µg/m³ per year "
-                f"(95% CI {_ci[0]} to {_ci[1]})", indent=24, font_size=9)
+                f"Theil-Sen slope: {_tt.get('sen_slope_per_day')} µg/m³ per day "
+                f"(95% CI {_dci[0]} to {_dci[1]}); modelled change across the "
+                f"{_tt.get('span_days')}-day window: {_tt.get('sen_change_over_period')} µg/m³",
+                indent=24, font_size=9)
+            if _tt.get("annualised"):
+                _ci = _tt.get("sen_slope_ci") or ["N/A", "N/A"]
+                draw_line(
+                    f"Equivalent annual rate: {_tt.get('sen_slope_per_year')} µg/m³ per year "
+                    f"(95% CI {_ci[0]} to {_ci[1]})", indent=24, font_size=9)
+            elif _tt.get("annualisation_note"):
+                draw_wrapped(_tt.get("annualisation_note"), indent=24, font_size=8.5,
+                             color=(0.30, 0.30, 0.30))
             draw_line(
                 f"Mann-Kendall: τ = {_tt.get('tau')}, p = {_tt.get('p_value')} — {_tt.get('direction')}"
                 f" ({'statistically significant' if _tt.get('significant') else 'not significant'} at α=0.05)",
@@ -2483,10 +2636,15 @@ def build_report_pdf(
                 f"(EPA 35: {_ex.get('days_over_epa35')} days).", indent=24, font_size=9)
             if _ex.get("excess_mortality_risk_pct") is not None:
                 draw_wrapped(
-                    f"Illustrative long-term excess-mortality risk: +{_ex.get('excess_mortality_risk_pct')}% "
-                    f"(WHO/GBD log-linear RR≈1.08 per 10 µg/m³, relative to the WHO 15 µg/m³ guideline). "
-                    f"This is an illustrative population estimate, not a clinical prediction.",
+                    f"Modelled long-term excess-mortality risk: +{_ex.get('excess_mortality_risk_pct')}% — the "
+                    f"additional risk a population would carry if this average concentration persisted for years "
+                    f"(WHO/GBD log-linear RR≈1.08 per 10 µg/m³, relative to the WHO 15 µg/m³ guideline). This is a "
+                    f"population-level illustration only. It is not a clinical prediction and says nothing about "
+                    f"the health of any individual at this location.",
                     indent=24, font_size=9, color=(0.30, 0.30, 0.30))
+            elif _ex.get("risk_withheld_note"):
+                draw_wrapped(_ex.get("risk_withheld_note"), indent=24, font_size=9,
+                             color=(0.30, 0.30, 0.30))
             y -= 6
         if _rp and _rp.get("repro_id"):
             draw_line("Reproducibility:", indent=12, font_size=10, bold=True)
@@ -2691,17 +2849,15 @@ def build_report_pdf(
             "Overall Quality": 70,
             "Sensor Agreement": 85,
             "Inter-Channel Stability": 70,
-            "Measurement Frequency": 70,
-            "EPA Compliance": 0,
+            "Sampling Regularity": 70,
         }
         descriptions = {
-            "Internal Data Integrity": "Fraction of recorded PM2.5 readings that pass all range checks",
+            "Internal Data Integrity": "Fraction of the rows you submitted that passed all validity checks",
             "Temporal Completeness": "Fraction of expected recording slots (typically 2-min intervals) that contain data",
             "Overall Quality": "Composite: 40% validity + 60% coverage — penalises both bad readings and silent periods",
             "Sensor Agreement": "Fraction of reading pairs where Channel A and B are within ±10% of their mean",
-            "Inter-Channel Stability": "Derived from the CV between channels: CV < 5% → ~100%; CV ≥ 15% → 0% (JHU/MIT criteria)",
-            "Measurement Frequency": "Actual readings per hour vs expected rate — drops if sensor is stuttering or skipping",
-            "EPA Compliance": "Fraction of readings below the EPA 24-h standard of 35 µg/m³ (informational, not a quality gate)",
+            "Inter-Channel Stability": "Derived from the CV between channels: CV < 5% → ~100%; CV ≥ 15% → 0% (this platform's scale)",
+            "Sampling Regularity": "Readings received vs expected at this export's own sampling interval — drops if the sensor stutters or skips",
         }
 
         for lbl, val in zip(radar_profile["labels"], radar_profile["values"]):
@@ -2817,8 +2973,8 @@ def build_report_pdf(
             "sign of laser degradation, dust build-up, or aging affecting one channel more "
             "than the other. If it trends downward, B is drifting higher. Cyclical daily "
             "swings suggest a temperature or humidity effect acting differently on each "
-            "sensor element. A sustained median beyond ±5 µg/m³ meets the JHU/MIT threshold "
-            "for field inspection and possible recalibration.",
+            "sensor element. A sustained median beyond ±5 µg/m³ is the threshold this platform "
+            "uses to recommend field inspection and possible recalibration.",
             "Long-term drift is one of the most common and hardest-to-detect failure modes of "
             "low-cost optical particle counters. The shaded fill makes the sign of the drift "
             "immediately visible (teal = A high, red = B high), while the navy median line "
@@ -2835,9 +2991,10 @@ def build_report_pdf(
             "If the channels agree, points cluster tightly along the 1:1 line and the fitted slope "
             "is near 1 with an intercept near 0. A slope materially different from 1 indicates a "
             "proportional bias between channels; a non-zero intercept indicates a constant offset; "
-            "scatter away from the line indicates random disagreement. R² > 0.85 is the research-grade "
-            "acceptance threshold (JHU/MIT three-tier framework); 0.70–0.85 is acceptable with caveats; "
-            "below 0.70 the data should be treated as suspect until the cause is found.",
+            "scatter away from the line indicates random disagreement. This platform treats R² > 0.85 as the "
+            "acceptance threshold and 0.70–0.85 as acceptable with caveats; below 0.70 the data should be treated "
+            "as suspect until the cause is found. For reference, the U.S. EPA's published target value for PM2.5 "
+            "air sensors is R² ≥ 0.70 (EPA Performance Testing Protocols, Metrics, and Target Values, 2021).",
             "An A-vs-B scatter with a 1:1 reference is the standard way to document inter-sensor "
             "agreement for low-cost sensors, because it separates proportional bias (slope), constant "
             "offset (intercept), and random error (scatter) — distinctions a single overlaid time-series "
@@ -3198,8 +3355,16 @@ def build_public_report_pdf(
     _dp["_d"] = pd.to_datetime(_dp[_ts_d_p], errors="coerce").dt.date
     _dp = _dp.dropna(subset=["_d"])
     _pm_d_col = "pm25_corrected" if "pm25_corrected" in _dp.columns else "pm25"
-    _dp["_pm_val"] = _dp[_pm_d_col].apply(lambda v: max(0.0, float(v)) if pd.notna(v) else 0.0)
-    _total_days = max(1, len(_dp))
+    # A day with no measurement is NOT a clean day. Coercing missing values to 0
+    # would put them below every guideline and silently report sensor downtime as
+    # compliance, overstating air quality by exactly the amount of data lost. Days
+    # without a daily average are excluded, and every count below is therefore out
+    # of MONITORED days.
+    _dp["_pm_val"] = pd.to_numeric(_dp[_pm_d_col], errors="coerce")
+    _dp = _dp.dropna(subset=["_pm_val"])
+    _dp["_pm_val"] = _dp["_pm_val"].clip(lower=0.0)
+    _monitored_days = int(len(_dp))
+    _total_days = max(1, _monitored_days)
     _within_who_days = int((_dp["_pm_val"] <= 15).sum())
     _within_who_days_pct = round(100 * _within_who_days / _total_days)
 
@@ -3252,7 +3417,7 @@ def build_public_report_pdf(
     elif _within_who_days_pct >= 80:
         _glance_verdict = "Air quality was GENERALLY GOOD — most days met the WHO guideline."
         _glance_interp = (
-            f"{_within_who_days} of {_total_days} days ({_within_who_days_pct}%) met the WHO "
+            f"{_within_who_days} of {_total_days} monitored days ({_within_who_days_pct}%) met the WHO "
             f"24-hour guideline of 15 µg/m³; {_days_over} day{'s' if _days_over != 1 else ''} "
             f"exceeded it{_worst_note}. On days above the guideline, children, older adults, "
             f"and people with heart or lung conditions benefit from limiting prolonged outdoor "
@@ -3261,7 +3426,7 @@ def build_public_report_pdf(
     elif pm_f <= 35:
         _glance_verdict = "Air quality at this location was MODERATE during this period."
         _glance_interp = (
-            f"{_days_over} of {_total_days} days exceeded the WHO 24-hour guideline of 15 µg/m³"
+            f"{_days_over} of {_total_days} monitored days exceeded the WHO 24-hour guideline of 15 µg/m³"
             f"{_worst_note}, and the period average was {pm_f:.1f} µg/m³ — above the WHO guideline "
             f"but within the U.S. EPA 24-hour standard of 35 µg/m³. Long-term exposure at these "
             f"levels is associated with increased respiratory and cardiovascular risk in "
@@ -3272,7 +3437,7 @@ def build_public_report_pdf(
         _glance_verdict = "Air quality at this location was ELEVATED — a health concern this period."
         _glance_interp = (
             f"The period average of {pm_f:.1f} µg/m³ was above the level of the U.S. EPA 24-hour "
-            f"standard (35 µg/m³), and {_days_over} of {_total_days} days were above the WHO guideline"
+            f"standard (35 µg/m³), and {_days_over} of {_total_days} monitored days were above the WHO guideline"
             f"{_worst_note}. Reducing outdoor exposure on high-pollution days — and using indoor "
             f"filtration where available — is advisable, especially for children, older adults, "
             f"pregnant women, and people with heart or lung conditions."
@@ -3310,12 +3475,12 @@ def build_public_report_pdf(
     pdf.line(LM + 10, y[0] - 26, LM + UW - 10, y[0] - 26)
 
     # Contextual detail lines — each must fit ~97 chars at 8pt; dates formatted as "May 18"
-    # The peak is a single reading; the EPA 35 ug/m3 value is a 24-hour (daily)
+    # The peak is a single reading; the EPA 35 µg/m³ value is a 24-hour (daily)
     # standard, so it is cited as reference scale — not as a pass/fail limit.
     if _pm25_max_val < 35:
-        _max_ctx = f"Peak single reading: {_pm25_max_val:.1f} ug/m3 (for scale: EPA daily standard is 35 ug/m3)."
+        _max_ctx = f"Peak reading {_pm25_max_val:.1f} µg/m³; EPA 35 µg/m³ is a 24-hour average."
     else:
-        _max_ctx = f"Peak single reading: {_pm25_max_val:.1f} ug/m3 (above the EPA daily-standard level of 35 ug/m3)."
+        _max_ctx = f"Peak reading {_pm25_max_val:.1f} µg/m³; EPA 35 µg/m³ is a 24-hour average."
 
     if who_h == 0:
         _who_det = "No individual hours exceeded the WHO limit during the entire monitoring period."
@@ -3325,17 +3490,17 @@ def build_public_report_pdf(
 
     std_rows = [
         (pm_f <= 15,
-         f"Average PM2.5: {pm_corr} ug/m3  (WHO guideline: 15 ug/m3)",
+         f"Average PM2.5: {pm_corr} µg/m³  (WHO guideline: 15 µg/m³)",
          (f"Below the WHO guideline. {_max_ctx}" if pm_f <= 15
-          else f"Above the WHO 24-hour guideline of 15 ug/m3. {_max_ctx}")),
+          else f"Above the WHO 15 µg/m³ guideline. {_max_ctx}")),
         (who_h == 0,
-         f"Hours above WHO guideline level (15 ug/m3): {who_h}",
+         f"Hours above WHO guideline level (15 µg/m³): {who_h}",
          _who_det),
         (epa_h == 0,
-         f"Hours above EPA standard level (35 ug/m3): {epa_h}",
+         f"Hours above EPA standard level (35 µg/m³): {epa_h}",
          ("No hours reached the EPA 24-hour standard level during the entire monitoring period."
           if epa_h == 0
-          else f"Hourly PM2.5 was above the EPA 24-hour standard level (35 ug/m3) for {epa_h} hours.")),
+          else f"Hourly PM2.5 was above the EPA 24-hour standard level (35 µg/m³) for {epa_h} hours.")),
     ]
     ry = y[0] - 42
     for good, bold_t, detail_t in std_rows:
@@ -3477,9 +3642,14 @@ def build_public_report_pdf(
     d_work["_date"] = pd.to_datetime(d_work[ts_col], errors="coerce").dt.date
     d_work   = d_work.dropna(subset=["_date"]).sort_values("_date")
     pm_col_d = "pm25_corrected" if "pm25_corrected" in d_work.columns else "pm25"
-    d_work["_pm"] = (d_work[pm_col_d]
-                     .fillna(d_work["pm25"] if "pm25" in d_work.columns else 0)
-                     .apply(lambda v: max(0.0, float(v)) if pd.notna(v) else 0.0))
+    # Fall back to the raw daily value where the corrected one is unavailable, but
+    # leave genuinely missing days as NaN — never 0. Plotting a gap as 0 µg/m³ draws
+    # a fake "perfectly clean" day, which reads as excellent air quality when in fact
+    # nothing was measured. NaN renders as a break in the line, which is the truth.
+    _corrected = pd.to_numeric(d_work[pm_col_d], errors="coerce")
+    if "pm25" in d_work.columns:
+        _corrected = _corrected.fillna(pd.to_numeric(d_work["pm25"], errors="coerce"))
+    d_work["_pm"] = _corrected.clip(lower=0.0)
 
     # Daily PM2.5 box plot using hourly data grouped by date
     _tmp1 = None
@@ -3615,7 +3785,7 @@ def build_public_report_pdf(
         _cap_text = (
             "Chart: Average PM2.5 by hour of day plotted on a 24-hour clock face "
             f"({_cap_tz}, hour labels 00-23). Distance from centre = PM2.5 concentration. "
-            "Dashed rings = WHO 15 ug/m3 and EPA 35 ug/m3."
+            "Dashed rings = WHO 15 µg/m³ and EPA 35 µg/m³."
         )
         _cap_fs  = 7.5
         _cap_cpl = max(40, int((UW - 4) / (_cap_fs * 0.54)))
@@ -3638,8 +3808,8 @@ def build_public_report_pdf(
     if len(diurnal2) >= 4:
         c_hr = int(diurnal2.idxmin()); d_hr = int(diurnal2.idxmax())
         _wrap(
-            f"Cleanest typical hour: {_hfmt_tz(c_hr)} (avg {diurnal2[c_hr]:.1f} ug/m3). "
-            f"Highest average: {_hfmt_tz(d_hr)} ({diurnal2[d_hr]:.1f} ug/m3). "
+            f"Cleanest typical hour: {_hfmt_tz(c_hr)} (avg {diurnal2[c_hr]:.1f} µg/m³). "
+            f"Highest average: {_hfmt_tz(d_hr)} ({diurnal2[d_hr]:.1f} µg/m³). "
             "For outdoor walks and exercise, choose the hours where the chart shape stays "
             "closest to the centre.",
             lh=13, after=10
@@ -3731,29 +3901,29 @@ def build_public_report_pdf(
 
     # Tip 2: personalized to peak hour with explicit timezone
     _tip2_body = (f"Data from this monitoring period shows average PM2.5 is highest around "
-                  f"{_hfmt_tip(_peak_hr)} ({_peak_val} ug/m3) and lowest around "
-                  f"{_hfmt_tip(_clean_hr)} ({_clean_val} ug/m3){_tz_tip_note}. "
+                  f"{_hfmt_tip(_peak_hr)} ({_peak_val} µg/m³) and lowest around "
+                  f"{_hfmt_tip(_clean_hr)} ({_clean_val} µg/m³){_tz_tip_note}. "
                   f"Schedule outdoor exercise, children's play, and gardening during the "
                   f"low-concentration hours for reduced exposure.")
 
     # Tip 3: personalized to WHO exceedance context
     if who_h == 0:
-        _tip3_body = ("PM2.5 stayed below the WHO guideline of 15 ug/m3 for every individual hour "
+        _tip3_body = ("PM2.5 stayed below the WHO guideline of 15 µg/m³ for every individual hour "
                       "of this monitoring period. This is an excellent result. Keep windows open "
                       "during your cleanest hours to refresh indoor air without concern.")
     else:
-        _tip3_body = (f"On the {who_h} hours that exceeded the WHO guideline of 15 ug/m3 "
+        _tip3_body = (f"On the {who_h} hours that exceeded the WHO guideline of 15 µg/m³ "
                       f"({_who_pct}% of monitoring time), keeping windows closed and running "
                       f"a HEPA air purifier indoors can meaningfully reduce your personal exposure. "
                       f"A portable HEPA filter can remove up to 80% of fine particles from a room.")
 
     # Tip 4: peak PM2.5 context
-    _tip4_body = (f"The highest recorded hourly average during this period was {_pm25_max_val:.1f} ug/m3. "
-                  f"This brief peak was still below the EPA 24-hour standard of 35 ug/m3, which means "
+    _tip4_body = (f"The highest recorded hourly average during this period was {_pm25_max_val:.1f} µg/m³. "
+                  f"This brief peak was still below the EPA 24-hour standard of 35 µg/m³, which means "
                   f"no hour during this monitoring period reached the level where the EPA considers air "
                   f"unhealthy for sensitive groups." if _pm25_max_val < 35 else
-                  f"The highest hourly average of {_pm25_max_val:.1f} ug/m3 exceeded the EPA 24-hour "
-                  f"standard of 35 ug/m3. During such peaks, reduce outdoor time, especially for "
+                  f"The highest hourly average of {_pm25_max_val:.1f} µg/m³ exceeded the EPA 24-hour "
+                  f"standard of 35 µg/m³. During such peaks, reduce outdoor time, especially for "
                   f"children, elderly residents, and anyone with respiratory conditions.")
 
     # Tip 5: sensitive groups
@@ -3801,7 +3971,7 @@ def build_public_report_pdf(
          "PurpleAir optical particle counter — Plantower laser sensor + BME280 humidity/temperature chip"),
         ("PM2.5 Correction",
          "EPA Barkjohn formula applied per-reading using concurrent humidity (Barkjohn et al., 2021). "
-         "Formula: Corrected PM2.5 = 0.534 × raw_PM − 0.0844 × RH + 5.604"),
+         "Formula: Corrected PM2.5 = 0.524 × raw_PM − 0.0862 × RH + 5.75"),
         ("Total readings",
          f"{n_rd:,} measurements recorded approximately every 2 minutes over the monitoring period"),
         ("Data quality score",
@@ -3900,13 +4070,13 @@ def build_public_report_pdf(
     # Verdict strip — wrapped so long lines never cross the right margin
     if _within_who_days_pct == 100:
         _verdict_line = (f"PM2.5 remained at or below the WHO guideline of 15 µg/m3 "
-                         f"for all {_total_days} days monitored — no days had elevated pollution.")
+                         f"for all {_total_days} monitored days — no monitored day had elevated pollution.")
     elif _within_who_days_pct >= 80:
         _verdict_line = (f"PM2.5 remained at or below the WHO guideline of 15 µg/m3 for "
-                         f"{_within_who_days} of {_total_days} days ({_within_who_days_pct}% of the period).")
+                         f"{_within_who_days} of {_total_days} monitored days ({_within_who_days_pct}%).")
     else:
         _verdict_line = (f"PM2.5 was within the WHO guideline of 15 µg/m3 for "
-                         f"{_within_who_days_pct}% of days ({_within_who_days} of {_total_days}).")
+                         f"{_within_who_days_pct}% of monitored days ({_within_who_days} of {_total_days}).")
     _verdict_sub = (f"No hours exceeded the WHO 15 µg/m3 guideline during the monitoring period."
                     if who_h == 0 else
                     f"Hours above WHO 15 µg/m3: {who_h} ({_who_pct}% of monitoring time). "
@@ -4443,7 +4613,7 @@ def build_comparison_pdf(
     _section("6.  Methodology & Standards")
     _wrapped(
         "All PM2.5 values have been corrected using the EPA Barkjohn correction formula: "
-        "PM2.5_corr = 0.534 × PM2.5_raw − 0.0844 × RH + 5.604 (where RH is available). "
+        "PM2.5_corr = 0.524 × PM2.5_raw − 0.0862 × RH + 5.75 (where RH is available). "
         "Concentrations are evaluated against the WHO 24-hour guideline (15 µg/m³) and EPA "
         "24-hour standard (35 µg/m³); no AQI is computed, as this sensor measures only PM2.5. "
         "Quality Score = 0.4 × Validity + 0.6 × Coverage. "
@@ -4479,7 +4649,7 @@ def build_comparison_pdf(
 # Repro-ID uniquely pins the exact computation that produced a result.
 METHOD_VERSIONS = {
     "correction_default": "barkjohn_2021",
-    "correction_formula": "0.534*PA_cf1 - 0.0844*RH + 5.604",
+    "correction_formula": BARKJOHN_FORMULA,
     "lrapa": "0.5*PA_cf1 - 0.66",
     "aqu": "0.778*PA_cf1 + 2.65",
     "who_pm25_guideline": 15.0,
@@ -4493,7 +4663,16 @@ METHOD_VERSIONS = {
 # Barkjohn et al. (2021) national correction residual error (RMSE of corrected
 # PurpleAir PM2.5 vs FRM/FEM), used as the correction-error term of the
 # measurement-uncertainty band. Conservative published value (1σ, µg/m³).
+# RMSE of the corrected data against FRM/FEM reference monitors, reported in
+# Barkjohn et al. (2021): the correction "reduces the RMSE of the raw data from 8 to
+# 3 ug m-3, with an average FRM or FEM concentration of 9 ug m-3".
+#
+# Scope limit worth knowing: that figure is for 24-HOUR AVERAGES. Averaging suppresses
+# random error, so an hourly or 2-minute value carries more uncertainty than 3 ug/m3.
+# Applying it at sub-daily resolution therefore yields a LOWER BOUND on the true band,
+# which is stated in the returned method string rather than left implicit.
 BARKJOHN_RMSE = 3.0
+BARKJOHN_RMSE_BASIS = "24-hour averages (Barkjohn et al. 2021)"
 
 
 def compute_repro_hash(file_path: Path, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -4542,8 +4721,14 @@ def build_uncertainty(pm_series: pd.Series, channel_agreement: Optional[Dict[str
     pm = pd.to_numeric(pm_series, errors="coerce")
     cv = channel_agreement.get("cv_between_channels") if channel_agreement else None
     if cv is not None and cv == cv:  # not NaN
+        # The CV here is mean|A-B| / mean(PM). Treating it as one relative standard
+        # uncertainty is deliberately CONSERVATIVE: for two independent channels the
+        # standard uncertainty of their mean is roughly 0.63 x mean|A-B|, so this
+        # widens the band rather than narrowing it. Erring wide is the safe direction
+        # for an uncertainty claim, but it is stated rather than presented as exact.
         cv_frac = float(cv) / 100.0
-        method = "Dual-channel CV ⊕ Barkjohn RMSE (quadrature, 95%)"
+        method = ("Dual-channel spread ⊕ Barkjohn RMSE (quadrature, 95%); "
+                  "sensor term is a conservative upper estimate")
         single = False
     else:
         cv_frac = 0.0
@@ -4561,14 +4746,33 @@ def build_uncertainty(pm_series: pd.Series, channel_agreement: Optional[Dict[str
         "method": method,
         "single_channel": single,
         "barkjohn_rmse": BARKJOHN_RMSE,
+        "barkjohn_rmse_basis": BARKJOHN_RMSE_BASIS,
         "confidence": 0.95,
     }
 
 
+# A slope is only reported "per year" when the record actually spans a year. Below
+# that, annualising multiplies the fitted slope by 365/span — a 30-day record becomes
+# a 12x extrapolation beyond any observed data, producing figures like
+# "-75 ug/m3 per year (95% CI -188 to +18)" that look authoritative and mean nothing.
+MIN_DAYS_FOR_ANNUAL_SLOPE = 365
+
+
 def build_trend_test(daily_series: pd.Series) -> Optional[Dict[str, Any]]:
-    """Mann-Kendall trend + Theil-Sen slope (µg/m³ per year, 95% CI) + Pettitt
-    change-point. ``daily_series`` is daily-mean corrected PM2.5 indexed by date.
-    Returns None when there are too few days (<10) for a meaningful test."""
+    """Mann-Kendall trend + Theil-Sen slope + Pettitt change-point.
+
+    ``daily_series`` is daily-mean corrected PM2.5 indexed by date. Returns None when
+    there are too few days (<10) for a meaningful test.
+
+    Two deliberate departures from a naive implementation:
+
+    1. The Theil-Sen slope is reported in µg/m³ per DAY always, and additionally per
+       YEAR only when the record spans at least a year (see the constant above).
+    2. The Mann-Kendall p-value uses the Hamed & Rao (1998) variance correction for
+       serial correlation. Daily PM2.5 is strongly autocorrelated — consecutive days
+       share weather — and the classical test assumes independence, so an uncorrected
+       p-value is anti-conservative and reports trends that are not there.
+    """
     from scipy import stats as _stats
 
     s = daily_series.dropna()
@@ -4580,15 +4784,61 @@ def build_trend_test(daily_series: pd.Series) -> Optional[Dict[str, Any]]:
     n = len(y)
     if np.ptp(t_years) <= 0:
         return None
+    span_days = int((idx[-1] - idx[0]).days) + 1
 
-    # Mann-Kendall via Kendall's tau against a monotonic time axis.
-    tau, p_value = _stats.kendalltau(t_years, y)
-    # Theil-Sen slope + 95% CI (robust, non-parametric).
-    slope, intercept, lo_slope, hi_slope = _stats.theilslopes(y, t_years, 0.95)
+    # Kendall's tau describes the monotonic association; its sign gives the direction.
+    tau, _tau_p = _stats.kendalltau(t_years, y)
 
-    significant = bool(p_value is not None and p_value == p_value and p_value < 0.05)
+    # --- Mann-Kendall S and its variance, with ties correction -------------------
+    S = 0.0
+    for i in range(n - 1):
+        S += np.sum(np.sign(y[i + 1:] - y[i]))
+    _, tie_counts = np.unique(y, return_counts=True)
+    tie_term = np.sum(tie_counts * (tie_counts - 1) * (2 * tie_counts + 5))
+    var_s = (n * (n - 1) * (2 * n + 5) - tie_term) / 18.0
+
+    # --- Hamed & Rao (1998) correction for serial correlation --------------------
+    # Autocorrelation is measured on the rank series with the Theil-Sen trend removed,
+    # so a real trend is not mistaken for persistence.
+    autocorr_factor = 1.0
+    try:
+        _pre_slope = _stats.theilslopes(y, np.arange(n), 0.95)[0]
+        detrended = y - _pre_slope * np.arange(n)
+        ranks = _stats.rankdata(detrended)
+        rmean = ranks.mean()
+        denom = np.sum((ranks - rmean) ** 2)
+        if denom > 0:
+            acc = 0.0
+            for k in range(1, n):
+                rho = np.sum((ranks[:n - k] - rmean) * (ranks[k:] - rmean)) / denom
+                # Keep only lags that are individually significant (95%, ~2/sqrt(n)).
+                if abs(rho) > 1.96 / math.sqrt(n):
+                    acc += (n - k) * (n - k - 1) * (n - k - 2) * rho
+            if n > 2:
+                autocorr_factor = 1.0 + (2.0 / (n * (n - 1) * (n - 2))) * acc
+            autocorr_factor = float(max(1.0, autocorr_factor))
+    except Exception:
+        autocorr_factor = 1.0
+    var_s_corrected = var_s * autocorr_factor
+
+    if var_s_corrected > 0:
+        if S > 0:
+            z = (S - 1.0) / math.sqrt(var_s_corrected)
+        elif S < 0:
+            z = (S + 1.0) / math.sqrt(var_s_corrected)
+        else:
+            z = 0.0
+        p_value = float(2.0 * (1.0 - _stats.norm.cdf(abs(z))))
+    else:
+        z, p_value = 0.0, float("nan")
+
+    # Theil-Sen slope + 95% CI (robust, non-parametric), fitted in days.
+    t_days = np.asarray((idx - idx[0]).total_seconds()) / 86400.0
+    slope_day, _intercept, lo_day, hi_day = _stats.theilslopes(y, t_days, 0.95)
+
+    significant = bool(p_value == p_value and p_value < 0.05)
     if significant:
-        direction = "increasing" if slope > 0 else "decreasing"
+        direction = "increasing" if slope_day > 0 else "decreasing"
     else:
         direction = "no significant trend"
 
@@ -4602,18 +4852,40 @@ def build_trend_test(daily_series: pd.Series) -> Optional[Dict[str, Any]]:
     p_cp = float(min(1.0, 2.0 * np.exp(-6.0 * K * K / (n ** 3 + n ** 2))))
     cp_date = idx[cp_idx].strftime("%Y-%m-%d") if p_cp < 0.05 else None
 
-    return {
+    annualisable = span_days >= MIN_DAYS_FOR_ANNUAL_SLOPE
+    out = {
         "n_days": int(n),
+        "span_days": span_days,
         "tau": round(float(tau), 3) if tau == tau else None,
-        "p_value": round(float(p_value), 4) if (p_value is not None and p_value == p_value) else None,
-        "sen_slope_per_year": round(float(slope), 3),
-        "sen_slope_ci": [round(float(lo_slope), 3), round(float(hi_slope), 3)],
+        "p_value": round(float(p_value), 4) if p_value == p_value else None,
+        "mk_z": round(float(z), 3),
+        "autocorrelation_factor": round(float(autocorr_factor), 3),
+        # Always reported: the slope in the units the record can actually support.
+        "sen_slope_per_day": round(float(slope_day), 4),
+        "sen_slope_per_day_ci": [round(float(lo_day), 4), round(float(hi_day), 4)],
+        # Total modelled change across the observed window — the honest headline for
+        # a short record, since it interpolates rather than extrapolates.
+        "sen_change_over_period": round(float(slope_day * span_days), 2),
         "direction": direction,
         "significant": significant,
         "change_point_date": cp_date,
         "change_point_p": round(p_cp, 4),
-        "method": "Mann-Kendall (Kendall τ) · Theil-Sen slope · Pettitt change-point",
+        "method": ("Mann-Kendall (Hamed-Rao autocorrelation-corrected) · "
+                   "Theil-Sen slope · Pettitt change-point"),
+        "annualised": annualisable,
     }
+    if annualisable:
+        out["sen_slope_per_year"] = round(float(slope_day * 365.25), 3)
+        out["sen_slope_ci"] = [round(float(lo_day * 365.25), 3), round(float(hi_day * 365.25), 3)]
+    else:
+        out["sen_slope_per_year"] = None
+        out["sen_slope_ci"] = None
+        out["annualisation_note"] = (
+            f"Slope is reported per day and across the monitored window only: this record "
+            f"spans {span_days} day(s), and projecting it to an annual rate would extrapolate "
+            f"~{365.25 / max(span_days, 1):.0f}x beyond the data."
+        )
+    return out
 
 
 def build_exposure_metrics(hourly_corrected: pd.Series, sampling_hours: float = 1.0) -> Optional[Dict[str, Any]]:
@@ -4635,13 +4907,29 @@ def build_exposure_metrics(hourly_corrected: pd.Series, sampling_hours: float = 
             days_over_who = int((daily > 15.0).sum())
             days_over_epa = int((daily > 35.0).sum())
 
-    # WHO/GBD-style long-term relative risk, log-linear above the WHO guideline.
+    # WHO/GBD-style relative risk, log-linear above the WHO guideline.
+    #
+    # IMPORTANT: RR≈1.08 per 10 µg/m³ is derived from cohort studies of *multi-year*
+    # average exposure. Applying it to a short record would be a category error — a
+    # two-week upload cannot support a long-term risk statement. It is therefore
+    # reported only for records long enough to characterise a seasonal average, and
+    # is always phrased conditionally ("if this level persisted long term"), never as
+    # a prediction about the people at this address.
     rr_per_10 = 1.08
     excess_risk_pct = None
-    if mean_conc > 0:
-        delta = max(0.0, mean_conc - 15.0)
-        rr = rr_per_10 ** (delta / 10.0)
-        excess_risk_pct = round((rr - 1.0) * 100.0, 1)
+    risk_note = None
+    MIN_DAYS_FOR_RISK = 90
+    if n_days is not None and n_days >= MIN_DAYS_FOR_RISK:
+        if mean_conc > 0:
+            delta = max(0.0, mean_conc - 15.0)
+            rr = rr_per_10 ** (delta / 10.0)
+            excess_risk_pct = round((rr - 1.0) * 100.0, 1)
+    elif n_days is not None:
+        risk_note = (
+            f"Long-term excess-risk is not reported: this record covers {n_days} day(s), "
+            f"below the {MIN_DAYS_FOR_RISK}-day minimum. The underlying risk ratio describes "
+            f"multi-year average exposure and cannot be inferred from a short record."
+        )
 
     return {
         "mean_pm25": round(mean_conc, 2),
@@ -4652,9 +4940,14 @@ def build_exposure_metrics(hourly_corrected: pd.Series, sampling_hours: float = 
         "days_over_epa35": days_over_epa,
         "excess_mortality_risk_pct": excess_risk_pct,
         "rr_per_10ug": rr_per_10,
-        "note": ("Excess-risk is an illustrative long-term estimate (RR≈1.08 per 10 µg/m³, "
-                 "WHO/GBD log-linear) relative to the WHO 15 µg/m³ guideline — not a clinical "
-                 "prediction."),
+        "min_days_for_risk": MIN_DAYS_FOR_RISK,
+        "risk_withheld_note": risk_note,
+        "note": ("Excess-risk is a population-level modelling illustration, not a clinical or "
+                 "individual prediction: it estimates the additional long-term mortality risk a "
+                 "population would carry *if* this average concentration persisted for years "
+                 "(RR≈1.08 per 10 µg/m³, WHO/GBD log-linear, relative to the WHO 15 µg/m³ "
+                 "guideline). It says nothing about any individual's health, and it is withheld "
+                 "entirely for records shorter than 90 days."),
     }
 
 
@@ -4671,6 +4964,23 @@ def compute_did(control_series: pd.Series, treatment_series: pd.Series,
     if c.empty or t.empty:
         return None
     joined = pd.concat([c.rename("control"), t.rename("treat")], axis=1, join="inner").dropna()
+
+    # Collapse to ONE value per day before any inference.
+    #
+    # Hourly readings are not independent observations, and neither is the
+    # house-minus-control difference when a local source persists for hours or days
+    # (measured lag-1 autocorrelation ~0.7 on realistic episodes). Testing hourly
+    # pairs is pseudo-replication: it leaves the estimate unbiased but shrinks the
+    # confidence interval by roughly 4x and drives p-values far below their true
+    # value. Daily means are the same unit of analysis used in the project's
+    # published reports, so the app and the reports cannot disagree.
+    resampled_daily = False
+    if isinstance(joined.index, pd.DatetimeIndex) and len(joined) > 0:
+        span_days = (joined.index.max() - joined.index.min()).days + 1
+        if span_days >= 3 and len(joined) > span_days:
+            joined = joined.resample("D").mean().dropna()
+            resampled_daily = True
+
     if len(joined) < 8:
         return None
 
@@ -4690,13 +5000,19 @@ def compute_did(control_series: pd.Series, treatment_series: pd.Series,
             long["post"] = (long.index >= split_date).astype(int)
             long["did"] = long["treated"] * long["post"]
             X = sm.add_constant(long[["treated", "post", "did"]])
-            model = sm.OLS(long["pm"], X).fit()
+            # HAC (Newey-West) standard errors. Residuals from consecutive periods are
+            # correlated, and classical OLS errors would understate the interaction
+            # term's uncertainty for the same reason hourly pairing does.
+            _maxlags = max(1, int(round(len(joined) ** (1.0 / 3.0))))
+            model = sm.OLS(long["pm"], X).fit(cov_type="HAC",
+                                              cov_kwds={"maxlags": _maxlags})
             coef = float(model.params["did"])
             ci = model.conf_int().loc["did"].tolist()
             pval = float(model.pvalues["did"])
             excess_pct = round(coef / control_mean * 100.0, 1)
             ci_pct = [round(ci[0] / control_mean * 100.0, 1), round(ci[1] / control_mean * 100.0, 1)]
-            method = "Difference-in-differences (OLS interaction term)"
+            method = ("Difference-in-differences (OLS interaction term, "
+                      f"HAC/Newey-West SEs, maxlags={_maxlags})")
         else:
             diff = joined["treat"] - joined["control"]
             mean_diff = float(diff.mean())
@@ -4707,7 +5023,8 @@ def compute_did(control_series: pd.Series, treatment_series: pd.Series,
             pval = float(pval)
             excess_pct = round(mean_diff / control_mean * 100.0, 1)
             ci_pct = [round(lo / control_mean * 100.0, 1), round(hi / control_mean * 100.0, 1)]
-            method = "Paired difference (treated − control), 95% CI"
+            method = ("Paired difference (treated − control), 95% CI, "
+                      + ("daily means" if resampled_daily else "as supplied"))
     except Exception:
         return None
 
@@ -4719,6 +5036,7 @@ def compute_did(control_series: pd.Series, treatment_series: pd.Series,
         "control_mean": round(control_mean, 2),
         "treat_mean": round(treat_mean, 2),
         "n_paired": int(len(joined)),
+        "unit_of_analysis": "daily mean" if resampled_daily else "as supplied",
         "method": method,
     }
 
@@ -4930,15 +5248,17 @@ def analyze_dataset(
         _rh_coverage = 0.0
         _correction_applied = False
 
-    # Barkjohn can produce negative values at high RH + low raw PM.
-    # A negative result means the sensor is reading below the detection limit.
-    # Apply the same below-detection treatment as for sub-LDL raw values: LDL/√2.
-    mask_negative = cleaned["pm25_corrected"] < 0
-    if mask_negative.any():
-        cleaned.loc[mask_negative, "pm25_corrected"] = LDL_corrected
-
-    # Apply LDL correction to corrected PM2.5 as well
-    mask_corrected_below_ldl = (cleaned["pm25_corrected"] > 0) & (cleaned["pm25_corrected"] < LDL)
+    # Below-detection treatment for the corrected series.
+    #
+    # At high RH and low raw PM the Barkjohn equation can fall to or below zero, which
+    # means the sensor is reading below its detection limit rather than measuring clean
+    # air. Such values get the standard LOD/sqrt(2) substitution, as sub-LDL raw values
+    # do, so they neither bias statistics toward zero nor imply a real measurement.
+    #
+    # The mask deliberately spans [0, LDL): apply_epa_correction() clamps unphysical
+    # negatives to exactly 0, so a mask requiring "> 0" would skip precisely the
+    # readings this substitution exists to handle and leave them sitting at 0.
+    mask_corrected_below_ldl = cleaned["pm25_corrected"] < LDL
     if mask_corrected_below_ldl.any():
         cleaned.loc[mask_corrected_below_ldl, "pm25_corrected"] = LDL_corrected
 
@@ -5028,15 +5348,22 @@ def analyze_dataset(
     # and runs in <1s vs ~24s on raw 2-min data. Residuals still identify anomalies above the seasonal baseline.
     decomposition_df = build_decomposition(hourly_pm25, period=None)
 
-    # Count pollution events (same 2σ method as build_report_figures)
-    _n_events = 0
+    # Count of STL residuals beyond 2 standard deviations.
+    #
+    # This is NOT a pollution-event count and must not be presented as one: for any
+    # roughly normal residual about 5% of points exceed 2 sigma by definition, so the
+    # figure scales with record length rather than with pollution. It is retained as
+    # a decomposition diagnostic under an accurate name. The user-facing event count
+    # comes from detect_events() below, which identifies actual episodes.
+    _n_residual_outliers = 0
     _pm25_max = 0.0
     if decomposition_df is not None and not decomposition_df.empty and "residual" in decomposition_df.columns:
         _res = decomposition_df["residual"].dropna().values.astype(float)
         if len(_res) > 10:
             _std = float(np.nanstd(_res))
             if _std > 1e-6:
-                _n_events = int(np.sum(np.abs(_res) > 2.0 * _std))
+                _n_residual_outliers = int(np.sum(np.abs(_res) > 2.0 * _std))
+    _n_events = 0   # replaced with the real detected-event count once available
     if not hourly_pm25.empty:
         _pm25_max = float(hourly_pm25.dropna().max()) if not hourly_pm25.dropna().empty else 0.0
     elif not daily.empty:
@@ -5086,12 +5413,12 @@ def analyze_dataset(
             mad = (paired["pm25_a"] - paired["pm25_b"]).abs().mean()
             agree = (paired["pm25_a"] - paired["pm25_b"]).abs() <= (0.1 * paired[["pm25_a", "pm25_b"]].mean(axis=1) + 1)
             
-            # JHU/MIT STANDARD: Sensor Health Coefficient via Coefficient of Variation (CV)
+            # Sensor Health Coefficient via Coefficient of Variation (CV)
             # CV = (MAD / Mean_PM25) × 100 — statistically rigorous metric
             diff_series = paired["pm25_a"] - paired["pm25_b"]
             mean_pm25 = paired[["pm25_a", "pm25_b"]].mean(axis=1).mean()
             
-            # JHU/MIT Three-Tier Validation (based on MAD relative to Mean)
+            # Three-tier validation (based on MAD relative to Mean)
             sensor_cv = (mad / mean_pm25 * 100) if mean_pm25 > 0 else 0.0
             
             # Three-tier classification based on CV metric
@@ -5109,9 +5436,9 @@ def analyze_dataset(
                 "r2": round(float(r2), 3),
                 "mean_abs_diff": round(float(mad), 3),
                 "agreement_pct": round(float(agree.mean() * 100), 1),
-                "cv_between_channels": round(float(sensor_cv), 2),  # JHU/MIT: Coefficient of Variation
-                "sensor_validation_status": sensor_validation_status,  # JHU/MIT: Three-tier validation
-                "sensor_health_status": sensor_health,  # JHU/MIT: Health classification with CV threshold
+                "cv_between_channels": round(float(sensor_cv), 2),  # Coefficient of Variation
+                "sensor_validation_status": sensor_validation_status,  # Three-tier validation
+                "sensor_health_status": sensor_health,  # Health classification with CV threshold
             }
 
     stats_cols = [col for col in ["pm25", "pm25_corrected", "temperature", "humidity", "pressure"] if col in cleaned]
@@ -5123,7 +5450,14 @@ def analyze_dataset(
         "epa_35": int((_hourly_corrected > 35).sum()) if not _hourly_corrected.empty else 0,
     }
 
-    events = detect_events(cleaned, "pm25")
+    # Detect on EPA-corrected values, consistent with every other statistic in the
+    # app. Running this on the raw column compared uncorrected readings -- which run
+    # substantially higher than corrected ones -- against the 35 µg/m³ level, and so
+    # reported far more "sustained" episodes than the corrected data supports.
+    _event_col = "pm25_corrected" if "pm25_corrected" in cleaned.columns else "pm25"
+    events = detect_events(cleaned, _event_col)
+    # The reported event count is the number of episodes actually detected.
+    _n_events = int(len(events))
     events_display = pd.DataFrame()
     _highest_events_rows: list = []
     if not events.empty:
@@ -5254,7 +5588,8 @@ def analyze_dataset(
         return decimated_ts, decimated_data
 
     # Build radar profile for multi-dimensional data quality visualization with coverage score
-    radar_profile = build_radar_profile(cleaned, quality_score, channel_agreement, coverage_score)
+    radar_profile = build_radar_profile(cleaned, quality_score, channel_agreement, coverage_score,
+                                        n_rows_submitted=int(len(df_work)))
     pm25_temporal_radar = build_pm25_temporal_radar(cleaned, latitude=lat_value, longitude=lon_value, tz_label=_tz_label)
 
     channel_series = {"timestamps": [], "a": [], "b": [], "r2": channel_agreement.get("r2", None)}
@@ -5381,6 +5716,7 @@ def analyze_dataset(
             "total_readings": int(len(df_work)),
             "label": label or "Full period",
             "n_pollution_events": _n_events,
+            "n_stl_residual_outliers": _n_residual_outliers,
             "pm25_max": round(_pm25_max, 2),
             "narrative_summary": _narrative,
             "tz_label": _tz_label,
@@ -5412,7 +5748,7 @@ def analyze_dataset(
         "data_completeness": data_completeness,
         "charts": {
             "timeseries": {
-                # JHU/MIT STANDARD: Enforce physical gaps using asfreq ('2T')
+                # Enforce physical gaps using asfreq ('2T')
                 # Reindex with 2-minute frequency to inject NaN into missing periods
                 # This prevents false visual continuity across data gaps (e.g., 199.1h gap)
                 # IMPROVEMENT: Show full dataset with intelligent decimation for browser performance

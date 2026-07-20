@@ -15,7 +15,7 @@
 
 body {
   margin: 0;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   color: var(--ink);
   background: radial-gradient(circle at top left, #fffaf1, #f1e8da 50%, #e6d9c7 100%);
 }
@@ -42,13 +42,13 @@ body {
 }
 
 h1 {
-  font-family: 'Fraunces', serif;
+  font-family: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Times New Roman', serif;
   font-size: clamp(2.4rem, 5vw, 3.5rem);
   margin: 12px 0 16px;
 }
 
 h2 {
-  font-family: 'Fraunces', serif;
+  font-family: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Times New Roman', serif;
   margin: 0 0 16px;
 }
 
@@ -355,7 +355,7 @@ h2 {
 
 .chart-card h3 {
   margin: 0;
-  font-family: 'Fraunces', serif;
+  font-family: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Times New Roman', serif;
 }
 
 .chart-note {
@@ -504,7 +504,7 @@ tr:hover {
   border: 1px solid rgba(31, 28, 22, 0.2);
   border-radius: 12px;
   padding: 10px 12px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
 
 .window-dashboard {
@@ -909,7 +909,7 @@ tr:hover {
   padding: 10px 12px;
   border: 1px solid rgba(31, 28, 22, 0.2);
   border-radius: 8px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   font-size: 0.95rem;
   background: white;
   color: var(--ink);
@@ -1095,7 +1095,7 @@ tr:hover {
   padding: 8px 12px;
   border: 1.5px solid #d0ccc6;
   border-radius: 10px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   font-size: 0.9rem;
   background: #fff;
   color: var(--ink);
@@ -1358,7 +1358,7 @@ tr:hover {
   background: #1a2233;
   color: #c8cdd8;
   margin-top: 64px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
 .footer-inner {
   max-width: 1100px;
@@ -1647,3 +1647,59 @@ tr:hover {
 @media (max-width: 380px) {
   .cards { grid-template-columns: 1fr; }
 }
+
+/* "Try it with sample data" affordance in the dropzone */
+.sample-cta {
+  margin: 10px 0 0;
+  font-size: 0.82rem;
+  color: var(--muted, #6b7280);
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent, #2c7fb8);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-btn:hover:not(:disabled) { opacity: 0.8; }
+.link-btn:disabled { opacity: 0.55; cursor: progress; text-decoration: none; }
+
+/* Essentials / Advanced view switch.
+   Essentials is the default so a first-time visitor sees the headline results
+   rather than every statistical panel at once. Purely client-side. */
+.view-switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 18px;
+  padding: 10px 14px;
+  border: 1px solid var(--border, #e4e7ec);
+  border-radius: 10px;
+  background: var(--surface-alt, #f8fafc);
+}
+.view-switch-label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted, #6b7280);
+}
+.view-switch-buttons { display: inline-flex; border: 1px solid var(--border, #d8dce3); border-radius: 8px; overflow: hidden; }
+.view-btn {
+  border: none;
+  background: transparent;
+  padding: 6px 16px;
+  font: inherit;
+  font-size: 0.86rem;
+  cursor: pointer;
+  color: var(--muted, #55606e);
+}
+.view-btn + .view-btn { border-left: 1px solid var(--border, #d8dce3); }
+.view-btn.is-active { background: var(--accent, #1b3a5b); color: #fff; font-weight: 600; }
+.view-switch-note { font-size: 0.78rem; color: var(--muted, #6b7280); flex: 1 1 260px; }
+
+/* Hidden unless Advanced is selected. */
+body:not(.show-advanced) [data-advanced] { display: none !important; }
