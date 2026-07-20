@@ -1253,7 +1253,13 @@ def reference_validation(file_id: str) -> dict:
             "sensor": [round(sensor[h], 1) for h in common],
             "reference": [round(ref_series[h], 1) for h in common],
         },
-        "disclosure": "Only your sensor coordinates and date range were sent to OpenAQ; no PM2.5 data left this server.",
+        "reference_data_truncated": bool(ref.get("truncated")),
+        "disclosure": (
+            "Only your sensor coordinates and date range were sent to OpenAQ; no PM2.5 data left this server."
+            + (" Note: the reference monitor's record for this period was unusually long and was capped "
+               "during retrieval; comparison statistics may not cover the full period."
+               if ref.get("truncated") else "")
+        ),
     }
 
 
@@ -1317,7 +1323,19 @@ def pollution_rose(file_id: str) -> dict:
     mean_speed = [round(speeds[i] / counts[i], 1) if counts[i] else 0.0 for i in range(n_sec)]
     total_pm = sum(sums)
     weighted_pct = [round(100.0 * sums[i] / total_pm, 1) if total_pm > 0 else 0.0 for i in range(n_sec)]
-    dominant = int(np.argmax(sums)) if total_pm > 0 else None
+
+    # "Dominant" direction = the sector with the highest MEAN concentration, not the
+    # highest total. Total PM2.5-hours is confounded by how often the wind simply
+    # blew from that direction: a prevailing wind sector accumulates the largest sum
+    # almost by construction, regardless of whether pollution is actually elevated
+    # from that direction. Mean concentration is what a source-attribution reading
+    # ("which direction is the pollution coming FROM") actually requires.
+    #
+    # A minimum-hours floor avoids a single anomalous reading in a rarely-occupied
+    # sector (e.g. 1 hour at a spike value) winning on a near-meaningless sample.
+    _min_hours = max(3, int(0.02 * matched))
+    _eligible = [i for i in range(n_sec) if counts[i] >= _min_hours]
+    dominant = max(_eligible, key=lambda i: mean_pm[i]) if _eligible else None
 
     return {
         "sectors": labels,
@@ -1327,6 +1345,9 @@ def pollution_rose(file_id: str) -> dict:
         "hours_per_sector": counts,
         "pm_share_pct": weighted_pct,
         "dominant_sector": labels[dominant] if dominant is not None else None,
+        "dominant_sector_basis": "highest mean PM2.5 among sectors with >= "
+                                 f"{_min_hours} hours (not total contribution, which "
+                                 "is confounded by prevailing wind frequency)",
         "wind_units": wind.get("units", "km/h"),
         "n_hours": matched,
         "disclosure": "Only your sensor coordinates and date range were sent to Open-Meteo; no PM2.5 data left this server.",

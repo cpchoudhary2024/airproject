@@ -27,6 +27,10 @@ PM25_PARAMETER_ID = 2
 
 _TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 _MAX_RADIUS_M = 25000  # OpenAQ hard cap
+_HOURS_PAGE_SIZE = 1000
+# Safety cap on pagination: 20 pages x 1000 = 20,000 hours (~2.3 years). No realistic
+# PurpleAir analysis window needs more; this only bounds worst-case request count.
+_HOURS_MAX_PAGES = 20
 
 
 class ExternalError(Exception):
@@ -142,16 +146,33 @@ def fetch_openaq_reference(lat: Any, lon: Any, start_date: str, end_date: str,
             if not sensor_id:
                 raise ExternalError("The nearest monitor does not expose a PM2.5 sensor.")
 
-            meas_resp = client.get(
-                f"{OPENAQ_BASE}/sensors/{sensor_id}/hours",
-                params={
-                    "datetime_from": f"{s}T00:00:00Z",
-                    "datetime_to": f"{e}T23:59:59Z",
-                    "limit": 1000,
-                },
-            )
-            meas_resp.raise_for_status()
-            rows = (meas_resp.json() or {}).get("results") or []
+            # Paginate through every page of hourly data in the requested window.
+            #
+            # A single request caps at _HOURS_PAGE_SIZE (1000) hours = ~42 days. Any
+            # analysis period longer than that -- which includes any realistic
+            # multi-month PurpleAir deployment -- would otherwise come back silently
+            # truncated to an arbitrary, non-representative subset of the period,
+            # biasing every downstream statistic (bias, RMSE, R^2, slope) with no
+            # indication to the user that anything was cut off.
+            rows: list = []
+            truncated = False
+            for page in range(1, _HOURS_MAX_PAGES + 1):
+                meas_resp = client.get(
+                    f"{OPENAQ_BASE}/sensors/{sensor_id}/hours",
+                    params={
+                        "datetime_from": f"{s}T00:00:00Z",
+                        "datetime_to": f"{e}T23:59:59Z",
+                        "limit": _HOURS_PAGE_SIZE,
+                        "page": page,
+                    },
+                )
+                meas_resp.raise_for_status()
+                page_rows = (meas_resp.json() or {}).get("results") or []
+                rows.extend(page_rows)
+                if len(page_rows) < _HOURS_PAGE_SIZE:
+                    break
+            else:
+                truncated = True
     except httpx.HTTPStatusError as exc:
         if exc.response is not None and exc.response.status_code in (401, 403):
             raise ExternalError("Reference-monitor lookup is not authorized (check the OpenAQ API key).")
@@ -183,4 +204,5 @@ def fetch_openaq_reference(lat: Any, lon: Any, start_date: str, end_date: str,
         "latitude": coords.get("latitude"),
         "longitude": coords.get("longitude"),
         "series": series,  # UTC-hour key ('YYYY-MM-DDTHH') -> pm25
+        "truncated": truncated,  # True only if the pagination safety cap was hit
     }
