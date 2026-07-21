@@ -1687,16 +1687,17 @@ def build_report_figures(
         ax.set_ylabel("PM2.5 (µg/m³)")
         ax.set_xticks(range(0, 24, 2))
         ax.set_xlim(-0.5, 23.5)
+        # Small headroom above the band and a floor at zero so the 10th-percentile
+        # edge is never flush against the axis or clipped.
+        _p90max = float(np.nanmax(diurnal_df["p90"])) if len(diurnal_df) else 1.0
+        ax.set_ylim(bottom=0, top=_p90max * 1.08 if _p90max > 0 else 1.0)
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(True, alpha=0.3)
 
-        # Add caveat about data gaps affecting hourly sample sizes — inside axes area
-        ax.annotate(
-            "⚠ Hours coinciding with the data-gap period have fewer observations; interpret those hours with caution.",
-            xy=(0.01, 0.02), xycoords='axes fraction',
-            fontsize=7, style='italic', color='#666666',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='#fffbe6', alpha=0.8, edgecolor='#ccaa00')
-        )
+        # The data-gap caveat is NOT drawn on the plot: it lives in this chart's
+        # caption ("hours overlapping a sensor outage have fewer data points and may
+        # be less reliable"). The previous on-chart box sat over the bottom of the
+        # percentile band and obscured it, and appeared even when there was no gap.
 
         save_fig("Diurnal pattern", fig, "fig_diurnal.png")
 
