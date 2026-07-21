@@ -381,3 +381,58 @@ def test_word_export_headline_is_epa_corrected_not_raw():
     assert f"{corrected}" in text
     assert "EPA-corrected" in text
 
+
+
+# --------------------------------------------------------------------------
+# Narrative summary accuracy (must track the actual data, not stale claims)
+# --------------------------------------------------------------------------
+
+def _narrative_for(df):
+    resp = client.post("/api/analyze",
+                       files={"file": ("nar.csv", df.to_csv(index=False).encode(), "text/csv")},
+                       data={"timezone": "UTC"})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["result"]["summary"]["narrative_summary"]
+
+
+def _humidity_csv(n_hours, level, with_humidity=True, seed=3):
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2026-03-01", periods=n_hours * 6, freq="10min", tz="UTC")
+    pm = np.clip(level + 6 * np.sin(np.arange(len(idx)) / 50) + rng.normal(0, 4, len(idx)), 0.2, None)
+    cols = {"time_stamp": idx.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "pm2.5_cf_1": pm, "pm2.5_cf_1_a": pm + 0.3, "pm2.5_cf_1_b": pm - 0.3}
+    if with_humidity:
+        cols["humidity"] = np.clip(55 + 20 * np.sin(np.arange(len(idx)) / 40), 10, 99)
+    return pd.DataFrame(cols)
+
+
+def test_narrative_event_wording_matches_the_detector_used():
+    """The event count comes from detect_events() (rolling-median spikes + sustained
+    episodes), not from STL residuals. The narrative must not attribute it to 'STL
+    decomposition ... 2-standard-deviation threshold' -- that is a different method
+    with a different count, and the mismatch was visible between page 1 and the STL
+    chart."""
+    nar = _narrative_for(_humidity_csv(24 * 20, 12))
+    assert "STL decomposition) identified" not in nar
+    assert "2-standard-deviation threshold above background" not in nar
+
+
+def test_narrative_labels_uncorrected_when_no_humidity():
+    """With no humidity column the Barkjohn correction cannot run, so the reported
+    value is raw. The narrative must not call it 'EPA Barkjohn-corrected'."""
+    nar_no_rh = _narrative_for(_humidity_csv(24 * 20, 12, with_humidity=False))
+    assert "raw (uncorrected" in nar_no_rh
+    assert "Barkjohn-corrected PM2.5" not in nar_no_rh
+
+    nar_rh = _narrative_for(_humidity_csv(24 * 20, 12, with_humidity=True))
+    assert "EPA Barkjohn-corrected PM2.5" in nar_rh
+
+
+def test_narrative_above_guideline_has_no_acceptable_contradiction():
+    """A period mean above WHO 15 must not simultaneously be described as 'acceptable
+    for most people' (the US-AQI Moderate-band message). Leading with the AQI
+    category contradicted the guideline-exceedance sentence that followed."""
+    nar = _narrative_for(_humidity_csv(24 * 20, 32))   # mean well above 15
+    air = [seg for seg in nar.split("\n") if seg.startswith("AIR QUALITY")][0]
+    assert "above the WHO 24-hour guideline" in air
+    assert "acceptable for most people" not in air

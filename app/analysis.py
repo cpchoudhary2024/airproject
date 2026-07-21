@@ -344,11 +344,11 @@ def build_calendar_data(daily_aqi: pd.Series) -> dict:
 
 
 def build_narrative_summary(
-    pm_corr_avg, pm_raw_avg, aqi_avg, aqi_cat,
+    pm_corr_avg, pm_raw_avg,
     start_iso, end_iso, n_total,
     n_events, pm25_max, cv, coverage, quality_score,
     who_15_hours: int = 0, epa_35_hours: int = 0,
-    n_days: int = 0, aqi_current: int = 0,
+    n_days: int = 0, humidity_used: bool = True,
 ) -> str:
     """Comprehensive plain-English summary covering air quality, health risk, sensor health, and data quality."""
     try:
@@ -368,47 +368,44 @@ def build_narrative_summary(
         ]
 
         # ── 2. Air quality results ────────────────────────────────────────────
-        # AQI health guidance mapping
-        _aqi_guidance = {
-            "Good":              "satisfactory air quality — air pollution poses little or no risk (EPA AQI category definition).",
-            "Moderate":          "acceptable for most people, though unusually sensitive individuals may notice minor effects.",
-            "USG":               "unhealthy for sensitive groups (children, elderly, people with asthma or heart disease); "
-                                 "the general public is less likely to be affected.",
-            "Unhealthy":         "unhealthy for everyone; sensitive groups may experience more serious health effects. "
-                                 "Limit prolonged outdoor exertion.",
-            "Very Unhealthy":    "very unhealthy — health warnings in effect for the entire population. "
-                                 "Avoid all outdoor physical activity if possible.",
-            "Hazardous":         "hazardous — emergency health conditions for the entire population. "
-                                 "Stay indoors and keep windows closed.",
-        }
-        health_msg = _aqi_guidance.get(aqi_cat, "of uncertain category — check AQI thresholds.")
-
-        # Note: WHO 15 / EPA 35 formally apply to 24-hour (daily) means; the
-        # period mean is compared to those levels as context, and the wording
-        # says so explicitly to avoid a category error.
-        who_comparison = ""
+        # The health framing is the concentration-vs-guideline comparison, which is
+        # the basis this report states it uses throughout. The US-AQI *category* is
+        # given only as a labelled secondary cross-reference: leading with the AQI
+        # health message caused a contradiction (a >15 µg/m³ value falls in the AQI
+        # "Moderate/acceptable" band while simultaneously exceeding the WHO guideline).
         if pm_val is not None:
             if pm_val <= 15:
                 who_comparison = (
-                    f"The period mean is below the WHO 24-hour guideline level of 15 µg/m³ "
-                    f"(the guideline formally applies to daily means; see the exceedance counts below)."
+                    f"This is below the WHO 24-hour guideline level of 15 µg/m³ (the guideline formally "
+                    f"applies to daily means; see the exceedance counts below), indicating generally "
+                    f"acceptable air quality over the period."
                 )
             elif pm_val <= 35:
                 who_comparison = (
-                    f"The period mean is above the WHO 24-hour guideline level (15 µg/m³) but below the "
-                    f"EPA 24-hour standard level (35 µg/m³). Sustained exposure in this range is associated "
-                    f"with increased respiratory and cardiovascular risk in epidemiological studies (WHO, 2021)."
+                    f"This is above the WHO 24-hour guideline level (15 µg/m³) but below the EPA 24-hour "
+                    f"standard level (35 µg/m³). Sustained exposure in this range is associated with "
+                    f"increased respiratory and cardiovascular risk, particularly for children, older "
+                    f"adults, and people with heart or lung conditions (WHO, 2021)."
                 )
             else:
                 who_comparison = (
-                    f"The period mean is above both the WHO 24-hour guideline level (15 µg/m³) and the "
-                    f"EPA 24-hour standard level (35 µg/m³) — persistently elevated fine-particle "
-                    f"pollution associated with increased health risk across the exposed population."
+                    f"This is above both the WHO 24-hour guideline level (15 µg/m³) and the EPA 24-hour "
+                    f"standard level (35 µg/m³) — persistently elevated fine-particle pollution associated "
+                    f"with increased health risk across the exposed population."
                 )
+        else:
+            who_comparison = ""
+
+        # Correct label: the value is only "Barkjohn-corrected" when RH was available
+        # for the correction to run; otherwise it is the raw sensor reading.
+        _pm_label = "EPA Barkjohn-corrected" if humidity_used else "raw (uncorrected — no humidity data for the EPA correction)"
+        # No AQI-category cross-reference here: this report states throughout that it
+        # uses PM2.5 concentration vs the WHO/EPA guidelines as its basis, not AQI
+        # (see the glossary), so an AQI band label would be inconsistent and could
+        # imply a second, conflicting verdict.
 
         parts.append(
-            f"\nAIR QUALITY: The mean EPA Barkjohn-corrected PM2.5 was {pm_val:.1f} µg/m³, {health_msg} "
-            f"{who_comparison}"
+            f"\nAIR QUALITY: The mean {_pm_label} PM2.5 was {pm_val:.1f} µg/m³. {who_comparison}"
         )
 
         # ── 3. Peak and exceedances ───────────────────────────────────────────
@@ -429,18 +426,25 @@ def build_narrative_summary(
         parts.append(f"\nPOLLUTION EVENTS:{peak_note} {exceedance_note}")
 
         # ── 4. Detected events ────────────────────────────────────────────────
+        # This count and description must match detect_events() (rolling-median
+        # spikes + sustained >35 ug/m3 episodes) -- the method actually used to
+        # produce n_events. It previously described STL/2-sigma residuals instead,
+        # a different detector shown on a different chart, so the exec-summary
+        # figure and the STL Residuals chart's own count could legitimately
+        # disagree (they were never the same computation).
         if n_events > 0:
             parts.append(
-                f"Automated anomaly detection (STL decomposition) identified {n_events} pollution episode(s) "
-                f"that exceeded the 2-standard-deviation threshold above background levels. "
-                f"'Spike' events are sharp, short-duration surges (typically minutes to 1–2 hours) caused "
-                f"by nearby sources such as traffic, cooking, or burning. "
-                f"'Sustained' events last 3+ hours and often indicate regional pollution transport, "
-                f"wildfires, or prolonged industrial activity."
+                f"Automated event detection identified {n_events} pollution episode(s): brief 'spikes' "
+                f"that rise sharply above a rolling local baseline, and 'sustained' episodes where PM2.5 "
+                f"stayed above 35 µg/m³ for 3 or more hours. "
+                f"Spikes are typically minutes to 1–2 hours and often trace to nearby sources such as "
+                f"traffic, cooking, or burning. Sustained episodes more often indicate regional pollution "
+                f"transport, wildfires, or prolonged industrial activity. See the Top Pollution Events "
+                f"table in Key Findings for the ranked list."
             )
         else:
             parts.append(
-                "Automated anomaly detection found no statistically significant pollution episodes — "
+                "Automated event detection found no spikes or sustained episodes — "
                 "PM2.5 remained within normal background variation throughout the monitoring period."
             )
 
@@ -2394,11 +2398,12 @@ def build_report_pdf(
             f"hourly grouping so that all date boundaries and diurnal patterns reflect local calendar dates."
         )
     else:
+        # The UTC->local conversion example is given once, in the UTC glossary entry;
+        # not repeated here.
         _tz_methods_note = (
             "Timestamps: All timestamps are in UTC (Coordinated Universal Time) as recorded by the sensor. "
-            "No timezone conversion was applied. To convert to local time, add your UTC offset "
-            "(e.g., UTC−5 for US Eastern Standard, UTC+5:30 for India). "
-            "All time-of-day patterns in this report therefore show UTC hours (0–23)."
+            "No timezone conversion was applied, so all time-of-day patterns in this report show UTC "
+            "hours (0–23); see the UTC glossary entry to convert to local time."
         )
     draw_wrapped(_tz_methods_note, indent=12, font_size=9)
     y -= 4
@@ -2460,27 +2465,9 @@ def build_report_pdf(
                 indent=12, font_size=9, color=(0.75, 0.10, 0.10)
             )
         y -= 6
-        # Barkjohn correction transparency block in Sensor Performance
-        _sp_hum   = summary.get("humidity_used", False)
-        _sp_rh    = summary.get("mean_rh")
-        _sp_rh_mn = summary.get("rh_min")
-        _sp_rh_mx = summary.get("rh_max")
-        _sp_pm    = summary.get("pm25_average", 0.0)
-        if _sp_hum and _sp_rh is not None:
-            _sp_corr = round(barkjohn_corrected(_sp_pm, _sp_rh), 2)
-            draw_wrapped(
-                f"EPA Barkjohn correction applied per reading using concurrent RH. "
-                f"Dataset RH: mean {_sp_rh}%, range {_sp_rh_mn}–{_sp_rh_mx}%. "
-                f"Worked example (dataset means): 0.524 × {_sp_pm} − 0.0862 × {_sp_rh} + 5.75 = {_sp_corr} µg/m³.",
-                indent=12, font_size=9, color=(0.30, 0.30, 0.30)
-            )
-        else:
-            draw_wrapped(
-                "Humidity data unavailable — the Barkjohn correction could not be applied, so raw "
-                "(uncorrected) PM2.5 is reported. Raw readings may overestimate at high humidity.",
-                indent=12, font_size=9, color=(0.55, 0.35, 0.00)
-            )
-        y -= 4
+        # The Barkjohn correction formula, its worked example, and the humidity-
+        # coverage note live in Section 2 (Methods & Data Quality) and are not
+        # repeated here. Section 3 stays focused on inter-channel sensor performance.
 
     # ── Section 4: Analytical Methods ────────────────────────────────────────
 
@@ -2533,12 +2520,8 @@ def build_report_pdf(
         ("EPA Barkjohn Correction",
          "A regression formula (Barkjohn et al., 2021) developed specifically to correct PurpleAir low-cost sensor "
          "readings to align with co-located EPA reference monitors. It accounts for the sensor's humidity sensitivity."),
-        ("STL Decomposition",
-         "Seasonal-Trend decomposition using Loess — a statistical algorithm that peels apart a time series into "
-         "its trend, its regular daily rhythm, and any unexplained events."),
-        ("Diurnal Pattern",
-         "The recurring 24-hour cycle of air quality driven by daily human activity (traffic, cooking, heating) "
-         "and meteorological factors (boundary layer rise in the morning, collapse at night)."),
+        # STL Decomposition and Diurnal Pattern are deliberately NOT repeated here: Section 4
+        # (Analytical Methods), immediately above this glossary, already explains both in full.
         ("R² (R-squared)",
          "A measure of how well two things track each other, on a scale of 0 to 1. R² = 1.0 means perfect agreement; "
          "R² = 0.85 means the two channels explain 85% of each other's variation — the standard research-grade threshold."),
@@ -2648,9 +2631,10 @@ def build_report_pdf(
         if _rp and _rp.get("repro_id"):
             draw_line("Reproducibility:", indent=12, font_size=10, bold=True)
             draw_wrapped(
-                f"Reproducibility ID {_rp.get('repro_id')} — a SHA-256 fingerprint of the exact input data "
-                f"combined with the method/version set used ({(_rp.get('method_versions') or {}).get('app_version', '')}). "
-                f"Quote this ID to reproduce or independently audit every figure in this report.",
+                f"ID {_rp.get('repro_id')} — a checksum of this exact input file and the analysis method "
+                f"version ({(_rp.get('method_versions') or {}).get('app_version', '')}). Re-running this same "
+                f"file through this same software version will reproduce it; it does not verify anything on "
+                f"its own without the original file.",
                 indent=24, font_size=9, color=(0.30, 0.30, 0.30))
             y -= 6
 
@@ -2902,11 +2886,8 @@ def build_report_pdf(
             "rises over time, PM2.5 levels are trending upward. If it falls, air quality is "
             "improving. A flat line means stable background conditions. Where the orange line "
             "has a break, the sensor was offline — no data are invented to bridge that gap.",
-            "Rolling medians are the standard first-pass trend filter in air quality monitoring "
-            "because they are resistant to outliers: a single spike from a passing truck will "
-            "not skew the trend. The 24-hour window absorbs within-day variation while still "
-            "resolving multi-day directional shifts. This chart is suitable for direct inclusion "
-            "in peer-reviewed publications as evidence of long-term air quality direction."
+            "This filters out day-to-day noise so a real multi-day trend isn't hidden by a single "
+            "spike or a quiet stretch."
         ),
         "STL Residuals": (
             "After mathematically removing (1) the overall trend and (2) the regular 24-hour "
@@ -2918,12 +2899,8 @@ def build_report_pdf(
             "Each red dot marks a moment when something unusual happened — a nearby fire, a "
             "traffic incident, construction dust, an industrial emission event, or an unusual "
             "meteorological condition — that pushed PM2.5 well beyond the expected pattern.",
-            "Residual analysis is a cornerstone of source apportionment studies. By isolating "
-            "events that do not fit the diurnal cycle, researchers can time-match the red-dot "
-            "moments against meteorological data, traffic incident logs, or fire records to "
-            "identify probable pollution sources. This is directly applicable to EPA receptor "
-            "modelling and health-effects epidemiology studies that must distinguish chronic "
-            "background exposure from acute episodic exposure."
+            "Isolating what doesn't fit the normal daily pattern is how a specific episode gets "
+            "separated from routine background variation."
         ),
         "Diurnal pattern": (
             f"PM2.5 readings are grouped by hour of the day (0–23, {_hour_tz}) across the entire "
@@ -2936,11 +2913,8 @@ def build_report_pdf(
             "or pre-dawn. A wide shaded band at a given hour means that hour's concentration "
             "varies greatly from day to day; a narrow band means it is predictable. Note: "
             "hours overlapping a sensor outage have fewer data points and may be less reliable.",
-            "Diurnal patterns directly inform personal exposure modelling, activity-based "
-            "epidemiology, and urban-planning decisions. If assessing cumulative daily exposure "
-            "for a health study, concentrations must be weighted by the hours people spend "
-            "outdoors — this chart provides the concentration profile for that weighting. "
-            "It is a required element of most low-cost sensor data publications."
+            "This is the profile to use for timing outdoor activity around the cleanest hours "
+            "of the day."
         ),
         "PM2.5 Temporal Radar": (
             "The same hourly averages shown in the diurnal bar chart are re-plotted on a "
@@ -2954,11 +2928,8 @@ def build_report_pdf(
             "peak. A roughly circular shape means pollution is nearly constant throughout the "
             "day — typical of industrial or regional background sources. A slim shape that "
             "stays inside the WHO ring means consistently clean air at all hours.",
-            "The polar format reveals asymmetries in emission timing that can distinguish "
-            "source types at a glance. Traffic-dominated sites produce a two-lobed shape "
-            "(morning and evening). Residential wood-burning communities show a single "
-            "evening lobe. Industrial sites tend toward a flat circle. This concise format "
-            "is well-suited to exposure science publications where figure space is limited."
+            "The shape's asymmetry is a quick visual cue: two lobes suggests traffic, one evening "
+            "lobe suggests residential burning, a flat circle suggests a constant background source."
         ),
         "Sensor drift": (
             "Every reading's Channel A minus Channel B difference (in µg/m³) is plotted as "
@@ -2974,13 +2945,8 @@ def build_report_pdf(
             "swings suggest a temperature or humidity effect acting differently on each "
             "sensor element. A sustained median beyond ±5 µg/m³ is the threshold this platform "
             "uses to recommend field inspection and possible recalibration.",
-            "Long-term drift is one of the most common and hardest-to-detect failure modes of "
-            "low-cost optical particle counters. The shaded fill makes the sign of the drift "
-            "immediately visible (teal = A high, red = B high), while the navy median line "
-            "strips away day-to-day noise so a slow calibration decay becomes obvious. "
-            "Detecting drift early lets a researcher flag or trim affected data before months "
-            "of measurements are compromised — a direct analogue of the Levey-Jennings control "
-            "charts used in clinical laboratory quality management."
+            "Catching drift early means affected data can be flagged before it silently "
+            "compromises months of readings."
         ),
         "Channel A vs B": (
             "Each point is one paired reading: Channel A on the x-axis, Channel B on the y-axis. "
@@ -2994,11 +2960,8 @@ def build_report_pdf(
             "acceptance threshold and 0.70–0.85 as acceptable with caveats; below 0.70 the data should be treated "
             "as suspect until the cause is found. For reference, the U.S. EPA's published target value for PM2.5 "
             "air sensors is R² ≥ 0.70 (EPA Performance Testing Protocols, Metrics, and Target Values, 2021).",
-            "An A-vs-B scatter with a 1:1 reference is the standard way to document inter-sensor "
-            "agreement for low-cost sensors, because it separates proportional bias (slope), constant "
-            "offset (intercept), and random error (scatter) — distinctions a single overlaid time-series "
-            "cannot reveal. Dual-channel agreement is the intrinsic replication that distinguishes "
-            "PurpleAir from single-channel devices and is a required element of a rigorous methods section."
+            "This is the primary evidence that the two channels are measuring the same air, not "
+            "two different instrument problems."
         ),
         "Bland-Altman": (
             "The Bland–Altman plot is the standard method-agreement diagnostic. For every paired "
@@ -3010,52 +2973,8 @@ def build_report_pdf(
             "(proportional error) rather than a fixed offset — something a correlation/R² alone hides. "
             "About 95% of differences should fall within the limits of agreement; points outside flag "
             "readings where the two channels disagreed materially.",
-            "Bland–Altman is the accepted approach in metrology and epidemiology for comparing two "
-            "measurement methods, and is increasingly expected in low-cost-sensor literature because it "
-            "quantifies bias and its concentration-dependence directly — information a 1:1 scatter "
-            "supplements but does not fully replace. Together the scatter and Bland–Altman provide a "
-            "complete, publication-grade account of dual-channel agreement."
-        ),
-        "PM2.5 time series": (
-            "Every valid PM2.5 reading from the monitoring period is plotted in the order it "
-            "was recorded. Horizontal reference lines mark the EPA 24-hour standard "
-            "(35 µg/m³, dashed red) and the WHO 24-hour guideline (15 µg/m³, dashed orange).",
-            "The height of each point above the x-axis is its concentration in µg/m³. Points "
-            "above the red line fall in the 'Unhealthy for Sensitive Groups' zone or worse. "
-            "Sustained runs of high readings matter more for health than isolated spikes. "
-            "Flat stretches locked at a fixed value may indicate sensor saturation or a "
-            "frozen/stuck reading and should be investigated in the raw data.",
-            "This is the most fundamental chart in the report — the unprocessed data record. "
-            "It lets you visually inspect completeness, spot malfunctions, locate exceedance "
-            "events for regulatory compliance reporting, and confirm that smoothed trend "
-            "charts are not artifacts of the smoothing algorithm."
-        ),
-        "Hourly pattern": (
-            f"Mean PM2.5 for each hour of the day (00:00–23:00, {_hour_tz}) computed across all days "
-            "in the monitoring period, displayed as a bar chart. The data are numerically "
-            "identical to the diurnal line chart but presented in bar form.",
-            "The tallest bars identify your worst-pollution hours of the day. The shortest "
-            "bars identify the cleanest window — typically the best time for outdoor exercise, "
-            "opening windows for ventilation, or planning time-sensitive outdoor activities.",
-            "The bar chart format communicates hour-by-hour comparisons more directly than "
-            "a continuous line for audiences less familiar with time-series graphs. It is "
-            "widely used in community air quality reports and public health communication."
-        ),
-        "STL decomposition": (
-            "Three stacked panels each show a different component of the PM2.5 signal after "
-            "STL decomposition. Top panel: the slow-moving trend (overall direction of air "
-            "quality over weeks). Middle panel: the repeating 24-hour daily cycle. "
-            "Bottom panel: the residuals — what remains after removing trend and daily cycle.",
-            "If the trend panel slopes upward, background air quality is deteriorating over "
-            "the monitoring period. A large amplitude in the seasonal panel (tall peaks and "
-            "deep troughs) means the daily cycle is the dominant driver of PM2.5 variability "
-            "— typical of traffic-influenced urban sites. A mostly flat residual panel with "
-            "occasional spikes means the sensor is cleanly resolving episodic events.",
-            "STL decomposition is the standard approach for separating signal components in "
-            "atmospheric time-series analysis. It lets researchers answer three distinct "
-            "questions from a single dataset — Is air quality getting worse overall? (trend), "
-            "When during the day is it worst? (seasonal), Were there unusual pollution events? "
-            "(residuals) — with each component independently citable in publications."
+            "Unlike a single correlation number, this shows whether the two channels agree equally "
+            "well at low and high concentrations, not just on average."
         ),
         "Weekly heatmap": (
             "A colour grid where rows represent the seven days of the week (Monday at top) "
@@ -3067,10 +2986,8 @@ def build_report_pdf(
             "mornings are systematically redder than weekend mornings, commuter traffic "
             "is a dominant source. Similar patterns across all days suggest industrial, "
             "natural, or residential sources rather than commuter activity.",
-            "The weekly-by-hourly heatmap is one of the most information-dense summary "
-            "charts in exposure science. It simultaneously reveals diurnal patterns, weekly "
-            "patterns, and their interactions in a single compact visual. It is appropriate "
-            "for both technical research publications and community stakeholder presentations."
+            "This grid shows day-of-week and time-of-day patterns together, which the diurnal "
+            "chart alone can't."
         ),
     }
 
@@ -3389,6 +3306,8 @@ def build_public_report_pdf(
     # would understate short episodes. Health guidance describes documented
     # risk groups; it never asserts what "most people" experienced.
     _days_over = _total_days - _within_who_days
+    # Highest daily average (used by the verdict strip; None when no valid days).
+    _max_daily_val = float(_dp["_pm_val"].max()) if not _dp["_pm_val"].dropna().empty else None
     # Worst dates for the verdict must come from DAILY means (the same basis as
     # the day counts) — not from the hour-based list used elsewhere, which can
     # name more dates than there are exceedance days.
@@ -3727,10 +3646,17 @@ def build_public_report_pdf(
         # Data cells
         pdf.setFont("Helvetica", 8.5); _f(DGREY)
         pdf.drawString(COL_X[0] + 4, y[0] - 9, str(row["_date"]))
-        pdf.drawString(COL_X[1] + 4, y[0] - 9, f"{pm_v:.2f}")
-        who_c = (0.60, 0.06, 0.06) if pm_v > 15 else (0.00, 0.44, 0.18)
-        _f(who_c); pdf.drawString(COL_X[2] + 4, y[0] - 9,
-                                   "Above WHO guideline" if pm_v > 15 else "Within WHO guideline")
+        # A day with no measurement is not a day that met the guideline: "NaN > 15"
+        # evaluates to False in Python, so an unguarded comparison here previously
+        # fell through to the green "Within WHO guideline" branch for missing days.
+        if pd.isna(pm_v):
+            pdf.drawString(COL_X[1] + 4, y[0] - 9, "—")
+            _f(MGREY); pdf.drawString(COL_X[2] + 4, y[0] - 9, "No data")
+        else:
+            pdf.drawString(COL_X[1] + 4, y[0] - 9, f"{pm_v:.2f}")
+            who_c = (0.60, 0.06, 0.06) if pm_v > 15 else (0.00, 0.44, 0.18)
+            _f(who_c); pdf.drawString(COL_X[2] + 4, y[0] - 9,
+                                       "Above WHO guideline" if pm_v > 15 else "Within WHO guideline")
         y[0] -= ROW_H
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -3893,10 +3819,11 @@ def build_public_report_pdf(
                       f"{round(100 - _within_who_pct, 1)}% of the time), children, elderly adults, and "
                       f"people with respiratory conditions should reduce prolonged outdoor activities.")
     else:
+        # HEPA/indoor guidance lives in Tip 3 (what to do during elevated hours) and
+        # the at-risk-group detail in Tip 5; Tip 1 states only the headline result.
         _tip1_body = (f"PM2.5 exceeded the WHO guideline of 15 µg/m3 for {_who_pct}% of the monitoring "
-                      f"period. During these elevated periods, children, elderly adults, pregnant women, "
-                      f"and individuals with asthma or heart conditions should reduce prolonged vigorous "
-                      f"outdoor activity and consider using a HEPA air purifier indoors.")
+                      f"period. During these elevated periods, sensitive groups should reduce prolonged "
+                      f"outdoor exertion (see the guidance below).")
 
     # Tip 2: personalized to peak hour with explicit timezone
     _tip2_body = (f"Data from this monitoring period shows average PM2.5 is highest around "
@@ -3916,14 +3843,16 @@ def build_public_report_pdf(
                       f"a HEPA air purifier indoors can meaningfully reduce your personal exposure. "
                       f"A portable HEPA filter can remove up to 80% of fine particles from a room.")
 
-    # Tip 4: peak PM2.5 context
-    _tip4_body = (f"The highest recorded hourly average during this period was {_pm25_max_val:.1f} µg/m³. "
-                  f"This brief peak was still below the EPA 24-hour standard of 35 µg/m³, which means "
-                  f"no hour during this monitoring period reached the level where the EPA considers air "
-                  f"unhealthy for sensitive groups." if _pm25_max_val < 35 else
-                  f"The highest hourly average of {_pm25_max_val:.1f} µg/m³ exceeded the EPA 24-hour "
-                  f"standard of 35 µg/m³. During such peaks, reduce outdoor time, especially for "
-                  f"children, elderly residents, and anyone with respiratory conditions.")
+    # Tip 4: peak PM2.5 context. The 35 µg/m³ level is a 24-hour standard, so a single
+    # hourly peak crossing it is not a compliance breach — stated explicitly to avoid a
+    # category error. At-risk-group guidance is not repeated here (it is in Tip 5).
+    _tip4_body = (f"The highest single hourly average during this period was {_pm25_max_val:.1f} µg/m³, "
+                  f"which stayed below the EPA 24-hour standard of 35 µg/m³. Brief hourly peaks are "
+                  f"normal and matter far less for health than sustained elevated levels." if _pm25_max_val < 35 else
+                  f"The highest single hourly average was {_pm25_max_val:.1f} µg/m³, above the EPA 35 µg/m³ "
+                  f"level. Note that 35 µg/m³ is a 24-hour average standard, so a one-hour peak above it "
+                  f"is not itself a standard exceedance — what matters is whether the daily average stays "
+                  f"elevated (see the daily table).")
 
     # Tip 5: sensitive groups
     _tip5_body = ("Children, pregnant women, elderly residents, and anyone with asthma, heart disease, "
@@ -3973,8 +3902,10 @@ def build_public_report_pdf(
          "Formula: Corrected PM2.5 = 0.524 × raw_PM − 0.0862 × RH + 5.75"),
         ("Total readings",
          f"{n_rd:,} measurements recorded approximately every 2 minutes over the monitoring period"),
+        # The score's formula and thresholds are given once, in the Monitoring
+        # Summary caption below; not repeated in this detail row.
         ("Data quality score",
-         f"{qs}% — {qs_l}  (formula: 0.4 × validity + 0.6 × temporal coverage)"),
+         f"{qs}% — {qs_l}"),
         ("Sensor agreement",
          f"{agree}% channel-to-channel agreement between the dual internal sensors" if agree
          else "Single-channel dataset — dual-channel agreement check not available"),
@@ -3996,12 +3927,11 @@ def build_public_report_pdf(
             "Measurement uncertainty",
             f"Each reading is accurate to about ±{_un_c.get('mean_ci_halfwidth')} µg/m³ (95% confidence). "
             f"Showing this range honestly is more scientific than a single number with no error."))
-    _rp_c = summary.get("repro")
-    if _rp_c and _rp_c.get("repro_id"):
-        INFO.append((
-            "Reproducibility ID",
-            f"{_rp_c.get('repro_id')} — a unique fingerprint of your data + the methods used, so anyone can "
-            f"reproduce or check these results."))
+    # A Reproducibility ID row previously appeared here too, but this report already
+    # states it has "no statistical jargon" (see the Note row above) -- a bare SHA-256
+    # checksum with no public lookup tool is exactly that jargon, and nothing in this
+    # report lets a reader actually use it. It stays in the Research Report, where a
+    # technical reader who kept the original file could act on it.
     LBL_W = 132   # label column width
     VAL_X = LM + LBL_W + 8
     VAL_W = UW - LBL_W - 12
@@ -4076,10 +4006,14 @@ def build_public_report_pdf(
     else:
         _verdict_line = (f"PM2.5 was within the WHO guideline of 15 µg/m3 for "
                          f"{_within_who_days_pct}% of monitored days ({_within_who_days} of {_total_days}).")
-    _verdict_sub = (f"No hours exceeded the WHO 15 µg/m3 guideline during the monitoring period."
-                    if who_h == 0 else
-                    f"Hours above WHO 15 µg/m3: {who_h} ({_who_pct}% of monitoring time). "
-                    f"PM2.5 below 15 µg/m3 for {_within_who_pct}% of the period.")
+    # Sub-line intentionally does NOT restate the hours-above-guideline figure: the
+    # Health Guidelines box on page 1 already gives it. Repeating it here in a third
+    # framing (days %, then hours %, then "below" %) read as three different numbers.
+    _verdict_sub = ("No daily average exceeded the WHO 15 µg/m3 guideline during the monitoring period."
+                    if _days_over == 0 else
+                    f"On the {_days_over} day(s) above the guideline, the highest daily average reached "
+                    f"{_max_daily_val:.1f} µg/m3." if _max_daily_val is not None else
+                    f"See the daily table for the {_days_over} day(s) above the guideline.")
     _v_textw = UW - 24
     _v_lines = textwrap.wrap(_verdict_line, width=max(40, int(_v_textw / (9 * 0.50))))
     _s_lines = textwrap.wrap(_verdict_sub,  width=max(40, int(_v_textw / (8 * 0.50))))
@@ -5641,8 +5575,11 @@ def analyze_dataset(
     _aqi_current, _, _ = calc_aqi_value(_last_pm) if not cleaned.empty else (0, "Unknown", "#9E9E9E")
     _cv          = channel_agreement.get("cv_between_channels")
     _n_days      = max(1, int((cleaned.index.max() - cleaned.index.min()).total_seconds() / 86400)) if not cleaned.empty else 0
+    # Whether the Barkjohn correction actually ran (it needs valid RH). When it didn't,
+    # the reported value is RAW, and the narrative must not call it "corrected".
+    _hum_used_nar = bool("humidity" in cleaned and cleaned["humidity"].between(*HUMID_RANGE).any())
     _narrative   = build_narrative_summary(
-        _pm_corr_avg, _pm_raw_avg, _aqi_avg, _aqi_cat,
+        _pm_corr_avg, _pm_raw_avg,
         cleaned.index.min().strftime('%Y-%m-%dT%H:%M:%S') if not cleaned.empty else None,
         cleaned.index.max().strftime('%Y-%m-%dT%H:%M:%S') if not cleaned.empty else None,
         int(len(df_work)), _n_events, _pm25_max, _cv,
@@ -5650,7 +5587,7 @@ def analyze_dataset(
         who_15_hours=int(exceedances.get("who_15", 0)),
         epa_35_hours=int(exceedances.get("epa_35", 0)),
         n_days=_n_days,
-        aqi_current=_aqi_current,
+        humidity_used=_hum_used_nar,
     )
 
     # ── Scientific-rigor add-ons (Tier 1–3) ──────────────────────────────────
