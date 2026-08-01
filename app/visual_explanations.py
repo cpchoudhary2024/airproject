@@ -14,7 +14,7 @@ VISUAL_EXPLANATIONS = {
         
         INTERPRETATION: Peaks indicate pollution episodes. Divergence between blue and orange lines reveals 
         humidity-dependent measurement bias. Flat regions represent sensor downtime or missing data. Compliance 
-        assessed against EPA 24-hour (35 µg/m³) and WHO annual (15 µg/m³) guidelines.
+        assessed against EPA 24-hour (35 µg/m³) and WHO 24-hour (15 µg/m³) guidelines.
         
         LIMITATIONS: Intra-minute variability smoothed by 2-minute averaging. EPA correction estimates true PM with 
         ±2.5 µg/m³ uncertainty. Gaps >24h recommended for trend analysis disruption notation.
@@ -186,8 +186,10 @@ VISUAL_EXPLANATIONS = {
         6. Temporal Consistency: % of expected sampling intervals observed (accounts for gaps)
         7. Data Coverage: % expected records relative to 2-min intervals over monitoring period
         
-        Publication Threshold: Score ≥80% on all metrics = research-grade. Scores <80% require metadata 
-        disclosure (gap locations, validation method, correction factors).
+        Screening Threshold: Score ≥80% on all metrics indicates a well-characterised low-cost-sensor
+        dataset suitable for community-science and research screening. Scores <80% require metadata
+        disclosure (gap locations, validation method, correction factors). Low-cost sensor data
+        complements, but does not replace, reference-grade regulatory monitors.
         
         INTERPRETATION: Six spokes at 100%, one at <80% = single issue (e.g., humidity sensor failure). 
         Multiple low spokes = systematic problem (e.g., instrument offline).
@@ -289,10 +291,10 @@ cardiovascular and respiratory health effects per EPA and WHO guidelines. Contin
 
 ### Monitoring Objectives
 1. Quantify PM2.5 concentrations and temporal patterns
-2. Assess compliance with EPA 24-hour (35 µg/m³) and WHO annual (15 µg/m³) guidelines
+2. Assess compliance with EPA 24-hour (35 µg/m³) and WHO 24-hour (15 µg/m³) guidelines
 3. Validate data quality through internal redundancy (dual sensors)
 4. Identify pollution episodes for source investigation
-5. Provide research-grade dataset for peer-reviewed publication
+5. Provide a well-documented low-cost-sensor dataset for community-science and research use
 
 ### Regulatory Context
 - **EPA NAAQS 24-hour standard:** 35 µg/m³ (not to be exceeded >3 days/year, 3-year average)

@@ -43,8 +43,10 @@ AQI_BREAKPOINTS = [
     (35.5, 55.4, 101, 150, "USG",           "#FF7E00"),
     (55.5, 125.4, 151, 200, "Unhealthy",    "#FF0000"),
     (125.5, 225.4, 201, 300, "Very Unhealthy", "#8F3F97"),
-    (225.5, 325.4, 301, 400, "Hazardous",   "#7E0023"),
-    (325.5, 10000.0, 401, 500, "Hazardous", "#7E0023"),
+    # EPA maps 225.5-325.4 µg/m³ to AQI 301-500 as a SINGLE Hazardous segment
+    # (per the AirNow/AQS breakpoint table). Values above 325.4 are "Beyond the AQI";
+    # the official index tops out at 500, handled by the cap in calc_aqi_value().
+    (225.5, 325.4, 301, 500, "Hazardous",   "#7E0023"),
 ]
 
 
@@ -434,13 +436,14 @@ def build_narrative_summary(
         # disagree (they were never the same computation).
         if n_events > 0:
             parts.append(
-                f"Automated event detection identified {n_events} pollution episode(s): brief 'spikes' "
-                f"that rise sharply above a rolling local baseline, and 'sustained' episodes where PM2.5 "
-                f"stayed above 35 µg/m³ for 3 or more hours. "
-                f"Spikes are typically minutes to 1–2 hours and often trace to nearby sources such as "
-                f"traffic, cooking, or burning. Sustained episodes more often indicate regional pollution "
-                f"transport, wildfires, or prolonged industrial activity. See the Top Pollution Events "
-                f"table in Key Findings for the ranked list."
+                f"Automated event detection identified {n_events} elevated episode(s): brief 'spikes' that "
+                f"rise sharply above the local rolling baseline (3σ) AND reach at least 15 µg/m³ (the WHO "
+                f"24-hour guideline level), and 'sustained' episodes where PM2.5 stayed above 35 µg/m³ for 3 "
+                f"or more hours. Spikes typically last minutes to 1–2 hours; they mark when and how high "
+                f"concentrations rose, but a particle sensor alone cannot identify the cause. Sustained "
+                f"episodes are more often associated with regional pollution transport, wildfire smoke, or "
+                f"prolonged nearby activity. See the Top Pollution Events table in Key Findings for the "
+                f"ranked list."
             )
         else:
             parts.append(
@@ -468,7 +471,7 @@ def build_narrative_summary(
 
         # ── 6. Data quality ───────────────────────────────────────────────────
         if quality_score >= 90:
-            q_label = "excellent — appropriate to support research publications and regulatory submissions"
+            q_label = "excellent — well suited to community-science and research screening (low-cost sensor data complements, but does not replace, reference-grade regulatory monitors)"
         elif quality_score >= 80:
             q_label = "good — appropriate for most research and community reporting purposes"
         elif quality_score >= 70:
@@ -603,7 +606,13 @@ def detect_events(df: pd.DataFrame, pm_col: str) -> pd.DataFrame:
     else:
         rolling_med = series.rolling(12, min_periods=6).median()
         rolling_std = series.rolling(12, min_periods=6).std().fillna(0)
-    spikes = series > (rolling_med + 3 * rolling_std)
+    # A spike must be BOTH statistically anomalous (3σ above the local rolling baseline) AND
+    # reach a health-relevant absolute level. Without the absolute floor, the 3σ rule fires on
+    # ordinary sensor jitter during clean periods (where σ is tiny), flagging sub-µg/m³ "spikes"
+    # that are noise, not pollution. Requiring ≥15 µg/m³ (the WHO 24-hour guideline level) keeps
+    # only excursions that are genuinely elevated.
+    SPIKE_MIN_ABS = 15.0
+    spikes = (series > (rolling_med + 3 * rolling_std)) & (series >= SPIKE_MIN_ABS)
 
     # 35 µg/m³ is the EPA 24-hour standard, used here as a "clearly elevated" level
     # for sustained (>=3 h) episodes -- not as a compliance determination, which
@@ -917,7 +926,7 @@ def build_report_markdown(summary: Dict[str, Any], quality_rows: List[Dict[str, 
                           channel_agreement: Dict[str, Any] = None,
                           events: pd.DataFrame = None) -> str:
     lines = [
-        "# Air Quality Research-Grade Analysis Report",
+        "# Air Quality Analysis Report",
         "",
         "## 1. Executive Summary",
         "",
@@ -926,7 +935,8 @@ def build_report_markdown(summary: Dict[str, Any], quality_rows: List[Dict[str, 
         "",
         f"**Analysis Period:** {summary['date_range']['start']} to {summary['date_range']['end']}",
         f"**Total Observations:** {summary['total_readings']} readings",
-        f"**Data Quality Score:** {summary['quality_score']}% (percentage of valid readings)",
+        f"**Data Quality Score:** {summary['quality_score']}/100 "
+        f"(composite: 0.4 × validity + 0.6 × temporal coverage — not the percent of valid readings)",
         "",
         f"**Period Average PM2.5 (raw):** {summary['pm25_average']} µg/m³",
         f"**Period Average PM2.5 (EPA-corrected):** {summary.get('pm25_average_epa_corrected', '—')} µg/m³",
@@ -990,9 +1000,13 @@ def build_report_markdown(summary: Dict[str, Any], quality_rows: List[Dict[str, 
         "",
         "### 3.5 Correction Factors Applied",
         "",
-        "- **EPA PM2.5 Correction:** Corrected = 0.524 × PM + 5.75 − 0.0862 × RH",
-        "  (Applied when relative humidity data available)",
-        "- **Channel Averaging:** When dual channels present, average used for final PM2.5",
+        "- **EPA PM2.5 Correction:** Corrected = 0.524 × PA_cf1 − 0.0862 × RH + 5.75",
+        "  (Barkjohn et al. 2021, EPA-adopted; applied when relative humidity data is available)",
+        "- **Channel Averaging:** When dual channels present, the A/B average of the cf_1 channel is used",
+        "- **Below-detection handling:** Readings below the Plantower detection limit (~1 µg/m³), and any "
+        "corrected value below 1 µg/m³, are set to LOD/√2 (≈0.71 µg/m³), the standard substitution for "
+        "left-censored (below-detection) values so statistics are not biased toward zero. Numerical impact "
+        "is small (typically <0.05 µg/m³ on the mean)",
         "- **Rolling Medians:** 24-hour and 7-day medians calculated to smooth hourly noise",
         "",
         "---",
@@ -1138,7 +1152,7 @@ def build_report_markdown(summary: Dict[str, Any], quality_rows: List[Dict[str, 
         "",
         "**Recommendations:**",
         "",
-        "1. **For Personal Health:** Use AQI values as guide for outdoor activity decisions.",
+        "1. **For Personal Health:** Use the PM2.5 concentration (and its PM2.5 sub-index) as a guide for outdoor activity decisions; consult official multi-pollutant AQI (airnow.gov) for the full picture.",
         "   Consult local health departments for sensitive group guidance.",
         "",
         "2. **For Research:** Export CSV files (cleaned_data, epa_corrected, hourly_summary)",
@@ -1651,10 +1665,10 @@ def build_report_figures(
         if has_significant_events:
             ax.scatter(ts_arr[significant_interior], res_arr[significant_interior],
                        color="#f25c54", s=22, alpha=0.85, zorder=5,
-                       label=f"Pollution Events (>{threshold:.1f} µg/m³, 2σ)")
+                       label=f"Residual anomalies (>{threshold:.1f} µg/m³, 2σ)")
 
         n_events = int(significant_interior.sum()) if has_significant_events else 0
-        ax.set_title(f"STL Residuals — Pollution Events Independent of Diurnal Cycle ({n_events} flagged)", fontsize=11, fontweight='bold')
+        ax.set_title(f"STL Residuals — Anomalies relative to the Diurnal Cycle ({n_events} points beyond 2σ)", fontsize=11, fontweight='bold')
         ax.set_xlabel("Date")
         ax.set_ylabel("Residual PM2.5 (µg/m³)")
         ax.xaxis.set_major_locator(AutoDateLocator())
@@ -2264,7 +2278,7 @@ def build_report_pdf(
     pdf.drawString(L_MARGIN, y, "Principal Investigator: Dr. Ana Maria Rule   ·   Data Analysis & Platform: Chandra Prakash Choudhary")
     y -= 12
     pdf.setFont("Helvetica", 8)
-    pdf.drawString(L_MARGIN, y, "This report was generated automatically using EPA-validated correction algorithms and research-grade quality metrics.")
+    pdf.drawString(L_MARGIN, y, "Generated automatically using the EPA-adopted Barkjohn (2021) correction and documented quality metrics for low-cost sensor data.")
     _set_fill(C_BODY)
     y -= 20
 
@@ -2897,9 +2911,9 @@ def build_report_pdf(
             "outliers more than two standard deviations above the residual mean.",
             "Think of this as a 'surprise detector.' When residuals cluster tightly near zero, "
             "air quality is following its predictable daily rhythm with few unexpected events. "
-            "Each red dot marks a moment when something unusual happened — a nearby fire, a "
-            "traffic incident, construction dust, an industrial emission event, or an unusual "
-            "meteorological condition — that pushed PM2.5 well beyond the expected pattern.",
+            "Each red dot marks a moment when PM2.5 departed from its expected pattern. Possible "
+            "explanations include a nearby fire, traffic, construction dust, an emission event, or "
+            "unusual weather — but a particle sensor alone cannot confirm the cause.",
             "Isolating what doesn't fit the normal daily pattern is how a specific episode gets "
             "separated from routine background variation."
         ),
@@ -5637,7 +5651,7 @@ def analyze_dataset(
                 f"Score primarily impacted by a contiguous {max_gap_days}-day network/power outage; "
                 f"internal data integrity remains {round(float(validity_score), 1)}% valid."
                 if coverage_score < 90 and max_gap_days > 0
-                else f"Excellent data quality — {round(float(coverage_score), 1)}% temporal coverage with {round(float(validity_score), 1)}% valid readings. Appropriate to support research publications and regulatory submissions."
+                else f"Excellent data quality — {round(float(coverage_score), 1)}% temporal coverage with {round(float(validity_score), 1)}% valid readings. Well suited to community-science and research screening; low-cost sensor data complements, not replaces, reference-grade regulatory monitors."
                 if quality_score >= 90
                 else f"Acceptable data quality (score {round(float(quality_score), 1)}/100). "
                      f"Coverage: {round(float(coverage_score), 1)}%, Validity: {round(float(validity_score), 1)}%."
@@ -5768,7 +5782,7 @@ def analyze_dataset(
             },
             "aqi_gauge": {
                 "title": "Air Quality Index",
-                "explanation": "In Simple Terms: The AQI (Air Quality Index) is a simple 0-500 number that summarizes pollution level. 0-50 is good (green), 51-100 is moderate (yellow), 101-150 is unhealthy for sensitive groups (orange), 151-200 is unhealthy (red), 201-300 is very unhealthy (purple), 301+ is hazardous (maroon).",
+                "explanation": "In Simple Terms: The AQI (Air Quality Index) is a 0-500 scale that summarizes pollution level. 0-50 is good (green), 51-100 is moderate (yellow), 101-150 is unhealthy for sensitive groups (orange), 151-200 is unhealthy (red), 201-300 is very unhealthy (purple), 301+ is hazardous (maroon). Note: the value here is the PM2.5 sub-index only — the official AQI is the maximum across several pollutants, so it could be higher if others (ozone, etc.) are elevated.",
                 "look_for": "Which health category the latest reading falls into. Lower numbers are always better."
             },
             "hourly_pattern": {

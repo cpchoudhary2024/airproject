@@ -153,15 +153,15 @@ function buildOverviewCards(summary) {
   overviewCards.innerHTML = '';
   const cards = [
     {
-      title: 'Current AQI',
+      title: 'Current PM2.5 AQI',
       value: summary.aqi_current,
-      note: summary.aqi_category,
+      note: `${summary.aqi_category} · PM2.5 sub-index only`,
       color: summary.aqi_color,
     },
     {
-      title: 'Average AQI',
+      title: 'Average PM2.5 AQI',
       value: summary.aqi_average,
-      note: 'Period average',
+      note: 'PM2.5 sub-index · period average',
       color: summary.aqi_color,
     },
     {
@@ -175,12 +175,12 @@ function buildOverviewCards(summary) {
       value: `${summary.quality_score}%`,
       note: `Validity: ${summary.validity_score}% | Coverage: ${summary.coverage_score}%`,
       color: summary.quality_score >= 80 ? '#00a651' : summary.quality_score >= 70 ? '#f6aa1c' : '#ff4444',
-      formula: '0.4×Validity + 0.6×Coverage (Research-Grade Penalized Completeness)',
+      formula: '0.4×Validity + 0.6×Coverage (coverage-penalized composite, 0–100)',
     },
     {
       title: 'Sensor Health (CV)',
       value: summary.sensor_health_cv !== null && summary.sensor_health_cv !== undefined ? `${summary.sensor_health_cv}%` : 'N/A',
-      note: summary.sensor_health_status || 'Research-Grade Check',
+      note: summary.sensor_health_status || 'Channel-agreement check',
       color: summary.sensor_health_cv < 10 ? '#00a651' : summary.sensor_health_cv < 15 ? '#f6aa1c' : '#ff4444',
     },
     {
@@ -431,7 +431,7 @@ function buildDownloads(fileId, outputs) {
   // Public section - simple exports
   const publicDataDownloads = [
     { key: 'hourly_summary', label: 'Hourly Summary Data (CSV)' },
-    { key: 'daily_aqi', label: 'Daily AQI Data (CSV)' },
+    { key: 'daily_aqi', label: 'Daily PM2.5 AQI Data (CSV)' },
   ];
   
   publicDataDownloads.forEach((item) => {
@@ -1058,8 +1058,8 @@ function buildComparison(analyses) {
       'Avg PM2.5 (EPA corr.)': _formatMaybeNumber(thisPmCorr, 1),
       'Δ PM2.5 vs File 1': index === 0 ? '' : _formatDelta(thisPmCorr !== null && basePmCorr !== null ? thisPmCorr - basePmCorr : null, 1),
       'Excess vs Control (95% CI)': didCell,
-      'Avg AQI': _formatMaybeNumber(thisAqi, 0),
-      'Δ AQI vs File 1': index === 0 ? '' : _formatDelta(thisAqi !== null && baseAqi !== null ? thisAqi - baseAqi : null, 0),
+      'Avg PM2.5 AQI': _formatMaybeNumber(thisAqi, 0),
+      'Δ PM2.5 AQI vs File 1': index === 0 ? '' : _formatDelta(thisAqi !== null && baseAqi !== null ? thisAqi - baseAqi : null, 0),
       'Quality Score (%)': _formatMaybeNumber(thisQs, 0),
       'Δ Quality vs File 1': index === 0 ? '' : _formatDelta(thisQs !== null && baseQs !== null ? thisQs - baseQs : null, 0),
     };

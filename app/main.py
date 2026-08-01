@@ -544,7 +544,7 @@ def export_to_word(file_id: str) -> FileResponse:
         charts_to_add = [
             ('fig_radar_quality.png', 'Data Quality Profile Radar', 
              'Multi-dimensional quality assessment evaluating PM2.5 validity, timestamp accuracy, sensor validity, '
-             'temporal consistency, and data coverage. Scores ≥80% on all metrics indicate research-grade data reliability.'),
+             'temporal consistency, and data coverage. Scores ≥80% on all metrics indicate a well-characterised low-cost-sensor dataset (screening/community-science grade; complements, not replaces, reference monitors).'),
             ('fig_channel_ab.png', 'Channel A vs B Correlation',
              'Validates instrument health by comparing dual-sensor measurements. Shows Pearson correlation coefficient and '
              'mean absolute difference. High agreement (R² > 0.85) indicates excellent data quality.'),
