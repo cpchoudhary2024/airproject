@@ -165,9 +165,11 @@ function buildOverviewCards(summary) {
       color: summary.aqi_color,
     },
     {
-      title: 'Average PM2.5',
-      value: `${summary.pm25_average} µg/m³`,
-      note: 'Observed PM2.5',
+      title: 'Average PM2.5 (EPA-corrected)',
+      value: `${(summary.pm25_average_epa_corrected ?? summary.pm25_average)} µg/m³`,
+      note: (summary.pm25_average_epa_corrected != null && summary.pm25_average_epa_corrected !== summary.pm25_average)
+        ? `EPA-corrected · raw ${summary.pm25_average} µg/m³`
+        : 'raw (humidity unavailable for correction)',
       color: '#1f1c16',
     },
     {

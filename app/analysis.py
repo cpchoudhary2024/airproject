@@ -1297,20 +1297,20 @@ def build_decomposition(series: pd.Series, period: int = None) -> pd.DataFrame:
     if series.empty:
         return pd.DataFrame()
     
-    # FIX: Set period=720 for 2-minute interval data to capture stochastic pollution events
+    # Set the seasonal period from the sampling cadence (period=720 for 2-minute data).
     if period is None:
         time_diffs = series.index.to_series().diff()
         median_interval = time_diffs.median()
-        
-        # Calculate period for 24-hour cycle based on sampling frequency
-        if median_interval:
-            minutes_per_interval = median_interval.total_seconds() / 60
-            period = max(24, int(1440 / minutes_per_interval))  # 24-hour cycle
-        else:
-            period = 24  # Fallback to hourly assumption
-    
-    # Ensure sufficient data for STL (requires minimum 2×period points)
-    if len(series) < period * 2:
+        # A single row, or rows that collapsed to one distinct timestamp, give a NaT median;
+        # a zero interval gives a divide-by-zero. Either way the cadence is undefined, so STL
+        # cannot run — return empty rather than crashing on int(NaN)/int(inf).
+        if pd.isna(median_interval) or median_interval.total_seconds() <= 0:
+            return pd.DataFrame()
+        minutes_per_interval = median_interval.total_seconds() / 60
+        period = max(24, int(1440 / minutes_per_interval))  # 24-hour cycle
+
+    # STL needs a valid period and at least 2×period points; degenerate periods are unusable.
+    if not period or period < 2 or len(series) < period * 2:
         return pd.DataFrame()
 
     # STL requires a complete series (no NaN). Interpolate gaps so STL produces valid residuals.
@@ -1321,9 +1321,14 @@ def build_decomposition(series: pd.Series, period: int = None) -> pd.DataFrame:
     else:
         series_clean = series
 
-    # Use robust STL to resist outliers during gap-heavy periods
-    stl = STL(series_clean, period=period, robust=True, seasonal=period + 1 if period % 2 == 0 else period)
-    result = stl.fit()
+    # Use robust STL to resist outliers during gap-heavy periods. A near-constant or otherwise
+    # degenerate series can make the fit raise; treat that as "no decomposition available"
+    # rather than failing the whole analysis.
+    try:
+        stl = STL(series_clean, period=period, robust=True, seasonal=period + 1 if period % 2 == 0 else period)
+        result = stl.fit()
+    except Exception:
+        return pd.DataFrame()
 
     df = pd.DataFrame(
         {
@@ -1719,16 +1724,21 @@ def build_report_figures(
     pm25_radar = pm25_temporal_radar
     if pm25_radar and pm25_radar.get("labels") and pm25_radar.get("values"):
         num_vars = len(pm25_radar["labels"])
+        # Categories with no data arrive as None/NaN (e.g. a short file missing some hours);
+        # coerce to 0 so the polar plot, max() and the label loop never compare None with a float.
+        _rv = [float(v) if v is not None and not (isinstance(v, float) and np.isnan(v)) else 0.0
+               for v in pm25_radar["values"]]
         angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
-        values = pm25_radar["values"] + [pm25_radar["values"][0]]
+        values = _rv + [_rv[0]]
         angles += angles[:1]
 
         fig, ax = plt.subplots(figsize=(8.5, 8.5), subplot_kw=dict(projection='polar'))
         ax.plot(angles, values, 'o-', linewidth=3, color="#f25c54", label="PM2.5 (µg/m³)", markersize=9)
         ax.fill(angles, values, alpha=0.25, color="#f25c54")
 
-        max_val = pm25_radar.get("max_value", max(values[:-1]) if values else 50)
-        yticks_max = int(np.ceil(max_val / 10) * 10)
+        _mv = pm25_radar.get("max_value")
+        max_val = _mv if (_mv is not None and _mv > 0) else (max(_rv) if _rv else 50)
+        yticks_max = max(int(np.ceil(max_val / 10) * 10), 10)   # never a zero-range axis
         yticks = np.linspace(0, yticks_max, 5)
         ax.set_yticks(yticks)
         ax.set_yticklabels([f'{int(v)}' for v in yticks], size=10, weight='bold')
@@ -1827,13 +1837,22 @@ def build_report_figures(
             # ── 6b. Bland–Altman (method-agreement) ────────────────────────────
             _mean_ab = (a_v + b_v) / 2.0
             _diff_ab = a_v - b_v
-            _bias = float(np.mean(_diff_ab)); _sd = float(np.std(_diff_ab, ddof=1))
+            # Drop any non-finite pairs (inf/NaN) — they make hexbin's extent invalid.
+            _fin = np.isfinite(_mean_ab) & np.isfinite(_diff_ab)
+            _mean_ab, _diff_ab = np.asarray(_mean_ab)[_fin], np.asarray(_diff_ab)[_fin]
+            _bias = float(np.mean(_diff_ab)) if _diff_ab.size else 0.0
+            _sd = float(np.std(_diff_ab, ddof=1)) if _diff_ab.size > 1 else 0.0
             _loa_hi = _bias + 1.96 * _sd; _loa_lo = _bias - 1.96 * _sd
-            _within = float(np.mean((_diff_ab >= _loa_lo) & (_diff_ab <= _loa_hi)) * 100)
-            # X range trimmed to 99th pct so the dense low-concentration region is readable
-            _xmax = float(np.nanpercentile(_mean_ab, 99))
-            _ypad = max(_loa_hi - _bias, _bias - _loa_lo, float(np.nanstd(_diff_ab)) * 0.5, 0.5)
-            _ylo, _yhi = _bias - 2.6 * (_loa_hi - _bias if _loa_hi > _bias else _ypad), _bias + 2.6 * (_loa_hi - _bias if _loa_hi > _bias else _ypad)
+            _within = float(np.mean((_diff_ab >= _loa_lo) & (_diff_ab <= _loa_hi)) * 100) if _diff_ab.size else 0.0
+            # X range trimmed to 99th pct so the dense low-concentration region is readable.
+            _xmax = float(np.nanpercentile(_mean_ab, 99)) if _mean_ab.size else 1.0
+            if not np.isfinite(_xmax) or _xmax <= 0:
+                _xmax = 1.0
+            # Y half-range: always strictly positive so the hexbin extent is never degenerate.
+            _span = max(_loa_hi - _bias, _bias - _loa_lo, _sd * 0.5, 0.5)
+            if not np.isfinite(_span) or _span <= 0:
+                _span = 0.5
+            _ylo, _yhi = _bias - 2.6 * _span, _bias + 2.6 * _span
 
             fig, ax = plt.subplots(figsize=(8.2, 4.2))
             # Shaded 95% limits-of-agreement band
@@ -2275,7 +2294,7 @@ def build_report_pdf(
     # Attribution
     pdf.setFont("Helvetica", 8.5)
     _set_fill(C_MUTED)
-    pdf.drawString(L_MARGIN, y, "Principal Investigator: Dr. Ana Maria Rule   ·   Data Analysis & Platform: Chandra Prakash Choudhary")
+    pdf.drawString(L_MARGIN, y, "An independent community-science project   ·   Platform & data analysis: Chandra Prakash Choudhary")
     y -= 12
     pdf.setFont("Helvetica", 8)
     pdf.drawString(L_MARGIN, y, "Generated automatically using the EPA-adopted Barkjohn (2021) correction and documented quality metrics for low-cost sensor data.")
@@ -5840,20 +5859,34 @@ def analyze_dataset(
         channel_agreement=channel_agreement,
         events=events if not events.empty else None
     )
-    report_figures = build_report_figures(
-        output_dir,
-        rolling_df,
-        diurnal_df,
-        drift_df,
-        channel_series,
-        radar_profile,
-        pm25_temporal_radar,
-        decomposition_df,
-        rolling_1h_timestamps=pm25_raw_for_1h.index,
-        rolling_1h_values=rolling_1h_series,
-        tz_label=_tz_label,
-        heatmap_summary=heatmap_summary,
-    )
+    # Figures are supplementary: a single chart failing on an unusual dataset must never abort
+    # the whole analysis (the numeric results, tables and downloads are the core deliverable).
+    # Individual root causes are fixed above; this is the last-resort net.
+    try:
+        report_figures = build_report_figures(
+            output_dir,
+            rolling_df,
+            diurnal_df,
+            drift_df,
+            channel_series,
+            radar_profile,
+            pm25_temporal_radar,
+            decomposition_df,
+            rolling_1h_timestamps=pm25_raw_for_1h.index,
+            rolling_1h_values=rolling_1h_series,
+            tz_label=_tz_label,
+            heatmap_summary=heatmap_summary,
+        )
+    except Exception as _fig_err:
+        import traceback as _tb
+        print(f"[analyze_dataset] figure generation failed, continuing without figures: "
+              f"{type(_fig_err).__name__}: {_fig_err}")
+        _tb.print_exc()
+        try:
+            plt.close("all")
+        except Exception:
+            pass
+        report_figures = []
     # Persist figure title→filename for community report regeneration
     result["_pdf_params"]["figures"] = [(title, path.name) for title, path in report_figures]
 
