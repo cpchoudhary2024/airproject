@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Chandra Prakash Choudhary. All rights reserved.
 from __future__ import annotations
 
 import json
@@ -59,11 +60,34 @@ class DetectedColumn:
 
 
 def normalize_col(name: str) -> str:
+    """Normalize a CSV header to a lowercase underscore token.
+
+    Args:
+        name (str): Raw column header from a PurpleAir export.
+
+    Returns:
+        str: Lowercased header with runs of non-alphanumerics collapsed to '_'
+        and leading/trailing underscores stripped.
+    """
     value = re.sub(r"[^a-z0-9]+", "_", name.strip().lower())
     return value.strip("_")
 
 
 def score_name_match(col_norm: str, patterns: Iterable[str]) -> float:
+    """Score how strongly a normalized header matches known column patterns.
+
+    Args:
+        col_norm (str): Normalized column name from ``normalize_col``.
+        patterns (Iterable[str]): Candidate patterns for one logical field.
+
+    Returns:
+        float: 1.0 exact match, 0.7 substring, 0.5 token match, 0.0 none.
+
+    Assumptions:
+        Only tokens of >= 3 characters count toward the 0.5 tier. One- and
+        two-character tokens (the 'a'/'b' channel suffixes) would otherwise match
+        almost any header, e.g. 'a' inside 'private'.
+    """
     score = 0.0
     for pattern in patterns:
         if col_norm == pattern:
@@ -81,6 +105,17 @@ def score_name_match(col_norm: str, patterns: Iterable[str]) -> float:
 
 
 def infer_channel(col_norm: str) -> Optional[str]:
+    """Infer which PurpleAir laser channel a column belongs to.
+
+    PurpleAir sensors carry two co-located laser counters (A and B); their
+    agreement is the primary sensor-health signal.
+
+    Args:
+        col_norm (str): Normalized column name.
+
+    Returns:
+        Optional[str]: 'A', 'B', or None when the column is channel-agnostic.
+    """
     if re.search(r"(channel|sensor|ch)_?a$", col_norm) or col_norm.endswith("_a"):
         return "A"
     if re.search(r"(channel|sensor|ch)_?b$", col_norm) or col_norm.endswith("_b"):
@@ -89,6 +124,16 @@ def infer_channel(col_norm: str) -> Optional[str]:
 
 
 def range_score(series: pd.Series, valid_range: Tuple[float, float]) -> float:
+    """Fraction of a column's values falling inside a physically plausible range.
+
+    Args:
+        series (pd.Series): Candidate column, coerced to numeric.
+        valid_range (Tuple[float, float]): Inclusive (low, high) bounds in the
+            field's native units (ug/m3 for PM2.5, % for RH, degC for temperature).
+
+    Returns:
+        float: Share of finite values within range, 0.0-1.0. 0.0 if none parse.
+    """
     numeric = pd.to_numeric(series, errors="coerce")
     numeric = numeric.dropna()
     if numeric.empty:
@@ -99,6 +144,14 @@ def range_score(series: pd.Series, valid_range: Tuple[float, float]) -> float:
 
 
 def timestamp_score(series: pd.Series) -> float:
+    """Fraction of a column that parses as a timestamp.
+
+    Args:
+        series (pd.Series): Candidate column.
+
+    Returns:
+        float: Share parsing as UTC datetimes, 0.0-1.0.
+    """
     parsed = pd.to_datetime(series, errors="coerce", utc=True)
     return float(parsed.notna().mean())
 
@@ -199,12 +252,35 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, List[DetectedColumn]]:
 
 
 def pick_best(detected: List[DetectedColumn]) -> Optional[DetectedColumn]:
+    """Return the highest-confidence detected column.
+
+    Args:
+        detected (List[DetectedColumn]): Candidates, ranked best-first.
+
+    Returns:
+        Optional[DetectedColumn]: Best candidate, or None if empty.
+    """
     return detected[0] if detected else None
 
 
 def choose_channels(
     detected: List[DetectedColumn],
 ) -> Tuple[Optional[DetectedColumn], Optional[DetectedColumn], Optional[DetectedColumn]]:
+    """Select the primary PM2.5 column plus its matching A and B channels.
+
+    Args:
+        detected (List[DetectedColumn]): Ranked PM2.5 column candidates.
+
+    Returns:
+        Tuple[Optional[DetectedColumn], ...]: (primary, channel_A, channel_B).
+
+    Assumptions:
+        A and B are held in the SAME calibration family as the primary (cf_1 vs
+        atm). Mixing families would compare a cf_1 primary against atm channels,
+        so the A/B agreement statistic would describe two different calibrations
+        rather than two physical sensors. Falls back to any same-channel column
+        when no same-family match exists.
+    """
     primary = pick_best(detected)
 
     # Keep A/B in the same calibration family as the primary (cf_1 vs atm). Mixing
@@ -567,6 +643,15 @@ def calc_aqi_value(pm: float) -> Tuple[int, str, str]:
 
 
 def calc_aqi_series(pm_series: pd.Series) -> pd.DataFrame:
+    """Vectorized wrapper converting a PM2.5 series to EPA AQI.
+
+    Args:
+        pm_series (pd.Series): PM2.5 concentrations, ug/m3 (EPA-corrected).
+
+    Returns:
+        pd.DataFrame: Columns ``aqi`` (int, 0-500), ``category`` (str) and
+        ``color`` (str hex), aligned positionally with the input.
+    """
     aqi_values = []
     labels = []
     colors = []
@@ -579,12 +664,42 @@ def calc_aqi_series(pm_series: pd.Series) -> pd.DataFrame:
 
 
 def summarize_stats(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    """Descriptive statistics for the selected numeric columns.
+
+    Args:
+        df (pd.DataFrame): Cleaned measurement frame.
+        columns (List[str]): Numeric columns to summarize.
+
+    Returns:
+        pd.DataFrame: One row per metric with count, mean, std, min, max and the
+        10/25/50/75/90th percentiles, in each column's native units.
+    """
     stats = df[columns].describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).T
     stats = stats.reset_index().rename(columns={"index": "metric"})
     return stats
 
 
 def detect_events(df: pd.DataFrame, pm_col: str) -> pd.DataFrame:
+    """Detect pollution episodes as spikes above a rolling local baseline.
+
+    Args:
+        df (pd.DataFrame): Frame indexed by timestamp where possible.
+        pm_col (str): Name of the corrected PM2.5 column, ug/m3.
+
+    Returns:
+        pd.DataFrame: One row per event with ``start``, ``end``,
+        ``duration_hours``, ``peak_pm25``, ``min_pm25``, ``pm25_range`` (ug/m3),
+        ``peak_timestamp`` and ``type``. Empty frame when none are found.
+
+    Assumptions:
+        The baseline window is TIME-based (2 h), not a fixed sample count, so the
+        detector means the same thing across export intervals: rolling(12) would
+        be 24 minutes on a 2-minute export but 12 hours on an hourly one.
+        A spike must be BOTH statistically anomalous (3 sigma above the rolling
+        median) AND reach 15 ug/m3, the WHO 24-hour guideline. Without the
+        absolute floor the 3-sigma rule fires on sensor jitter during clean
+        periods, where sigma is tiny, flagging sub-ug/m3 noise as pollution.
+    """
     _empty_cols = ["start", "end", "duration_hours", "peak_pm25", "min_pm25", "pm25_range", "peak_timestamp", "type"]
     if pm_col not in df.columns:
         return pd.DataFrame(columns=_empty_cols)
@@ -812,6 +927,19 @@ def build_anomaly_report(
 
 
 def estimate_sampling_minutes(timestamps: pd.Series) -> Optional[float]:
+    """Estimate the export's sampling interval from timestamp spacing.
+
+    Args:
+        timestamps (pd.Series): Timestamps, as a Series or DatetimeIndex.
+
+    Returns:
+        Optional[float]: Median positive gap in MINUTES, or None when it cannot
+        be determined.
+
+    Assumptions:
+        Uses the median rather than the mean so that data gaps and duplicated
+        timestamps do not distort the inferred interval.
+    """
     if timestamps.empty:
         return None
     # Convert to Series if it's an Index

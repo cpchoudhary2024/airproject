@@ -91,3 +91,73 @@ Report_*.docx
 Community_Air_Quality_Report*.docx
 Defense_Notes_Methods.docx
 build_defense_notes.py
+
+# ─── Data-engineering hygiene (added by audit) ───
+# Secrets — never commit credentials
+.env
+.env.*
+!.env.example
+
+# Raw / bulk data: keep on disk, keep out of git (regenerate or fetch on demand)
+data/raw/*
+data/cache/
+*.nc
+*.nc4
+*.hdf5
+*.parquet
+*.zip
+*.7z
+
+# Build artifacts & dependency trees
+node_modules/
+dist/
+build/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Stray logs & run debris
+*.log
+logs/
+*.pid
+
+# Office lock/temp files (e.g. ~$report.docx)
+~$*
+*.tmp
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# PurpleAir raw sensor exports (bulk, PII-bearing directory names)
+purple airs raw data*/
+*0-Minute Average.csv
+*0-Minute Average.xlsx
+
+# ─── Keep the standard scaffold under version control ───
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!outputs/
+!outputs/plots/
+!outputs/plots/.gitkeep
+!notebooks/
+
+# ─── PII GUARD — participant identities (never publish) ───
+# Embeds resident names/addresses for per-household report generation.
+# Verified untracked and absent from git history at the time this was added.
+build_resident_air_report.py
+Resident*Report*.docx
+resident_report_assets/
+# Raw sensor exports are foldered by resident first name.
+purple airs raw data*/

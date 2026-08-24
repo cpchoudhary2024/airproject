@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Chandra Prakash Choudhary. All rights reserved.
 """
 Professional yet accessible explanations for all data visualization and analysis sections.
 Suitable for both public stakeholder communication and research publication.
