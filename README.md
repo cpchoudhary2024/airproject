@@ -17,7 +17,7 @@ tags:
 
 # PurpleAir Air Quality Analyzer
 
-A web app that turns raw PurpleAir sensor exports into corrected PM2.5 estimates, checks the two internal sensor channels against each other, and produces PDF, Word and CSV reports.
+A web app that turns raw PurpleAir sensor exports into corrected PM2.5 estimates, checks the two internal sensor channels against each other, and produces report PDF, Word and CSV reports.
 
 Live app: https://cpchoudhary2024-airquality-analyzer.hf.space/
 
