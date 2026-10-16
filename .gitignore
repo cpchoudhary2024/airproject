@@ -1,0 +1,17 @@
+*
+!.gitignore
+!.dockerignore
+!Dockerfile
+!LICENSE
+!README.md
+!requirements.txt
+!app/
+!app/__init__.py
+!app/analysis.py
+!app/main.py
+!app/visual_explanations.py
+!app/static/
+!app/static/app.js
+!app/static/styles.css
+!app/templates/
+!app/templates/index.html
